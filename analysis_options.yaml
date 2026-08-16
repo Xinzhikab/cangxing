@@ -1,0 +1,32 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    prefer_const_declarations: true
+    avoid_print: true
+    avoid_unnecessary_containers: true
+    sized_box_for_whitespace: true
+    use_super_parameters: true
+    prefer_single_quotes: true
+    require_trailing_commas: true
+    always_use_package_imports: true
+    no_duplicate_case_values: true
+    prefer_is_empty: true
+    prefer_conditional_assignment: true
+    unnecessary_parenthesis: true
+    unnecessary_const: true
+    unnecessary_new: true
+    sort_child_properties_last: true
+    secure_pubspec_urls: true
+    no_logic_in_create_state: true
+    library_private_types_in_public_api: true
+    hash_and_equals: true
+    avoid_empty_else: true
+    camel_case_types: true
+    constant_identifier_names: true
+    library_names: true
+    library_prefixes: true
+    non_constant_identifier_names: true
+    file_names: true

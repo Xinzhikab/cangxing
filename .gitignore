@@ -1,0 +1,67 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ===== 以下为本地无关文件（其他项目产物/部署包/临时文件），不入库 =====
+# 大型二进制产物
+*.apk
+*.tar.gz
+# 其他项目（karakeep 部署）的目录与数据
+karakeep-data/
+dumps/
+_clip/
+.reasonix/
+# 零字节垃圾文件（历史命令误生成）
+A
+An
+Get
+Run
+adb
+# 个人环境同步脚本
+sync-to-nas.ps1
+deploy-fnos.sh
+# 本地笔记（含个人部署信息）
+N1部署手册.md
+IDEA.md
