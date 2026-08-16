@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/features/collections/data/providers/collections_list_controller.dart';
 
 /// 分类浏览的文章列表：按文件夹路径 / 平台 / 作者 / 标签筛选展示收藏。
@@ -20,22 +21,17 @@ class CategoryArticlesPage extends ConsumerWidget {
   });
 
   static String _platformLabel(String k) =>
-      {'douyin': '抖音', 'xiaoheihe': '小黑盒', 'coolapk': '酷安', 'other': '其他'}[
-          k] ??
-      k;
+      CollectionEnums.platformLabel(CollectionEnums.platformFromSql(k));
 
   String _statusLabel(String k) =>
-      {'learning': '想学', 'done': '已完成'}[k] ?? k;
+      CollectionEnums.statusLabel(CollectionEnums.statusFromSql(k));
 
-  Color _statusColor(String s) {
-    switch (s) {
-      case 'learning':
-        return Colors.orange;
-      case 'done':
-        return Colors.green;
-      default:
-        return Colors.grey;
-    }
+  Color _statusColor(String s) =>
+      CollectionEnums.statusColor(CollectionEnums.statusFromSql(s));
+
+  static bool _showStatusBadge(String s) {
+    final st = CollectionEnums.statusFromSql(s);
+    return st == CollectionStatus.learning || st == CollectionStatus.done;
   }
 
   String get _title {
@@ -51,7 +47,7 @@ class CategoryArticlesPage extends ConsumerWidget {
       categoryArticlesProvider(
         CategoryArticlesFilter(
           categoryPath: categoryPath,
-          platform: platform,
+          platform: CollectionEnums.platformFromSql(platform),
           author: author,
           tag: tag,
         ),
@@ -98,7 +94,7 @@ class CategoryArticlesPage extends ConsumerWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
                 // 已读/未读功能已移除：仅「想学 / 已完成」显示状态徽标
-                trailing: (c.status == 'learning' || c.status == 'done')
+                trailing: (_showStatusBadge(c.status))
                     ? Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 2),

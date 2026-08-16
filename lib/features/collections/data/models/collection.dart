@@ -18,6 +18,14 @@ class Collection {
   final String rawInput;
   final String contentMd;
 
+  /// 软删除时间戳（毫秒），null 表示未删除。
+  /// 仅由 DB 行的 deleted_at 列填充，meta JSON 中可选。
+  final int? deletedAt;
+
+  /// 置顶时间戳（毫秒），null 表示未置顶。
+  /// 仅由 DB 行的 pinned_at 列填充，meta JSON 中可选。
+  final int? pinnedAt;
+
   Collection({
     required this.id,
     required this.title,
@@ -35,6 +43,8 @@ class Collection {
     this.reviewDueAt,
     required this.rawInput,
     this.contentMd = '',
+    this.deletedAt,
+    this.pinnedAt,
   }) : collectedAt = collectedAt ?? DateTime.now();
 
   factory Collection.fromJson(Map<String, dynamic> json) {
@@ -61,6 +71,8 @@ class Collection {
           : null,
       rawInput: json['rawInput'] as String,
       contentMd: json['contentMd'] as String? ?? '',
+      deletedAt: json['deletedAt'] as int?,
+      pinnedAt: json['pinnedAt'] as int?,
     );
   }
 
@@ -82,6 +94,8 @@ class Collection {
       'reviewDueAt': reviewDueAt?.toIso8601String(),
       'rawInput': rawInput,
       'contentMd': contentMd,
+      if (deletedAt != null) 'deletedAt': deletedAt,
+      if (pinnedAt != null) 'pinnedAt': pinnedAt,
     };
   }
 
@@ -102,6 +116,10 @@ class Collection {
     DateTime? reviewDueAt,
     String? rawInput,
     String? contentMd,
+    int? deletedAt,
+    bool clearDeletedAt = false,
+    int? pinnedAt,
+    bool clearPinnedAt = false,
   }) {
     return Collection(
       id: id ?? this.id,
@@ -120,6 +138,8 @@ class Collection {
       reviewDueAt: reviewDueAt ?? this.reviewDueAt,
       rawInput: rawInput ?? this.rawInput,
       contentMd: contentMd ?? this.contentMd,
+      deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
+      pinnedAt: clearPinnedAt ? null : (pinnedAt ?? this.pinnedAt),
     );
   }
 }

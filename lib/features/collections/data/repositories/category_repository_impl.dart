@@ -13,6 +13,7 @@ class CategoryRepositoryImpl implements CategoryRepository {
   final FileStorageService fileStorage;
   final Uuid _uuid = const Uuid();
   final Completer<void> _ready = Completer<void>();
+  final void Function()? onChanged;
 
   Future<void> get ready => _ready.future;
 
@@ -20,6 +21,7 @@ class CategoryRepositoryImpl implements CategoryRepository {
     required this.db,
     required this.collectionRepo,
     required this.fileStorage,
+    this.onChanged,
   }) {
     _init();
   }
@@ -63,6 +65,7 @@ class CategoryRepositoryImpl implements CategoryRepository {
     final effectiveCat = cat.id.isEmpty ? cat.copyWith(id: effectiveId) : cat;
 
     await database.insert('categories', _categoryToRow(effectiveCat));
+    onChanged?.call();
     return effectiveCat;
   }
 
@@ -75,11 +78,16 @@ class CategoryRepositoryImpl implements CategoryRepository {
       where: 'id = ?',
       whereArgs: [cat.id],
     );
+    onChanged?.call();
     return cat;
   }
 
   @override
   Future<void> delete(String id) async {
+    // 【FTS 同步说明】分类删除只更新 collections.category_json 列。
+    // 由于 category_json 不在 collections_fts 的内容字段里（见 DatabaseService 建表注释），
+    // 因此此处【无需】 flushFts 或手动更新全文索引。
+    // 如果以后把分类加进 FTS 内容字段，删除后必须在这里也同步 FTS！
     final database = await db.database;
     final deletedNames = <String>{};
 
@@ -109,29 +117,50 @@ class CategoryRepositoryImpl implements CategoryRepository {
     // 现改为：SQL 定位 category 命中删除名的行，只改 meta 文件的
     // category 字段与 DB 的 category_json（分类不进 FTS，无需动索引）。
     if (deletedNames.isNotEmpty) {
-      final likeClauses = deletedNames.map((n) => 'category_json LIKE ?').join(' OR ');
-      final likeArgs = deletedNames.map((n) => '%"$n"%').toList();
       final rows = await database.query(
         'collections',
-        columns: ['id'],
-        where: likeClauses,
-        whereArgs: likeArgs,
+        columns: ['id', 'category_json'],
       );
+      final affectedIds = <String>[];
       for (final row in rows) {
-        final colId = row['id'] as String;
-        final meta = await fileStorage.loadMeta(colId);
-        if (meta == null) continue;
-        final remained = meta.category.where((c) => !deletedNames.contains(c)).toList();
-        final newCategory = remained.isEmpty ? ['未分类'] : remained;
-        await fileStorage.saveMeta(meta.copyWith(category: newCategory));
-        await database.update(
-          'collections',
-          {'category_json': jsonEncode(newCategory)},
-          where: 'id = ?',
-          whereArgs: [colId],
+        final categoryJson = row['category_json'] as String?;
+        if (categoryJson == null) continue;
+        final List<dynamic> categoryRaw = jsonDecode(categoryJson);
+        final category = categoryRaw.cast<String>();
+        if (category.any((c) => deletedNames.contains(c))) {
+          affectedIds.add(row['id'] as String);
+        }
+      }
+      if (affectedIds.isNotEmpty) {
+        final metas = await Future.wait<dynamic>(
+          affectedIds.map((id) => fileStorage.loadMeta(id)),
+        );
+        final validMetas = <(String, dynamic)>[];
+        final updates = <Map<String, dynamic>>[];
+        for (var i = 0; i < affectedIds.length; i++) {
+          final meta = metas[i];
+          if (meta == null) continue;
+          final remained = meta.category.where((c) => !deletedNames.contains(c)).toList();
+          final newCategory = remained.isEmpty ? ['未分类'] : remained;
+          validMetas.add((affectedIds[i], meta.copyWith(category: newCategory)));
+          updates.add({'id': affectedIds[i], 'category_json': jsonEncode(newCategory)});
+        }
+        await database.transaction((txn) async {
+          for (final u in updates) {
+            await txn.update(
+              'collections',
+              {'category_json': u['category_json']},
+              where: 'id = ?',
+              whereArgs: [u['id']],
+            );
+          }
+        });
+        await Future.wait<void>(
+          validMetas.map((e) => fileStorage.saveMeta(e.$2)),
         );
       }
     }
+    onChanged?.call();
   }
 
   @override

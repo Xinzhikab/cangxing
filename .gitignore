@@ -44,6 +44,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Android release signing
+android/keystore.properties
+
 # ===== 以下为本地无关文件（其他项目产物/部署包/临时文件），不入库 =====
 # 大型二进制产物
 *.apk
@@ -65,3 +68,9 @@ deploy-fnos.sh
 # 本地笔记（含个人部署信息）
 N1部署手册.md
 IDEA.md
+
+# Embedded sibling project
+BilibiliTask_3/
+
+# Android gradle build reports
+android/build/

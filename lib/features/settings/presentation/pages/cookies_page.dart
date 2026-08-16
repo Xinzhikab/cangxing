@@ -79,7 +79,7 @@ class _CookiesPageState extends ConsumerState<CookiesPage> {
 
   @override
   Widget build(BuildContext context) {
-    final cookies = ref.watch(cookieListProvider);
+    final cookiesAsync = ref.watch(cookieListProvider);
     return Scaffold(
       appBar: AppBar(
         title: const Text('抓取 Cookie 管理'),
@@ -111,49 +111,53 @@ class _CookiesPageState extends ConsumerState<CookiesPage> {
           ),
           const Divider(height: 24),
           Expanded(
-            child: cookies.isEmpty
-                ? const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(32),
-                      child: Text(
-                        '没有配置 Cookie。可从上方预设快速添加，或点右下角 + 按域名添加，抓网页时会自动匹配填入 Cookie 请求头',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
+            child: cookiesAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Center(child: Text('加载失败：$e')),
+              data: (cookies) => cookies.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Text(
+                          '没有配置 Cookie。可从上方预设快速添加，或点右下角 + 按域名添加，抓网页时会自动匹配填入 Cookie 请求头',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey),
+                        ),
                       ),
+                    )
+                  : ListView.separated(
+                      itemCount: cookies.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (_, i) {
+                        final c = cookies[i];
+                        return ListTile(
+                          leading: const Icon(Icons.cookie, color: Colors.brown),
+                          title: Text(
+                            c.domain,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            c.cookie.length > 40
+                                ? '${c.cookie.substring(0, 40)}…'
+                                : c.cookie,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          onTap: () => _editDialog(c),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () async {
+                              await ref
+                                  .read(cookieListProvider.notifier)
+                                  .remove(c.domain);
+                            },
+                          ),
+                        );
+                      },
                     ),
-                  )
-                : ListView.separated(
-                    itemCount: cookies.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
-                    itemBuilder: (_, i) {
-                      final c = cookies[i];
-                      return ListTile(
-                        leading: const Icon(Icons.cookie, color: Colors.brown),
-                        title: Text(
-                          c.domain,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          c.cookie.length > 40
-                              ? '${c.cookie.substring(0, 40)}…'
-                              : c.cookie,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        onTap: () => _editDialog(c),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline, color: Colors.red),
-                          onPressed: () async {
-                            await ref
-                                .read(cookieListProvider.notifier)
-                                .remove(c.domain);
-                          },
-                        ),
-                      );
-                    },
-                  ),
+            ),
           ),
         ],
       ),

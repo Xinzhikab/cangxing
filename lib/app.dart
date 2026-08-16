@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/core/router/app_router.dart';
 import 'package:fav_app/core/theme/app_theme.dart';
 import 'package:fav_app/features/learning/data/providers/review_notification_provider.dart';
@@ -53,24 +54,44 @@ class _FavAppState extends ConsumerState<FavApp> {
   @override
   Widget build(BuildContext context) {
     ref.read(shareSubscriptionProvider);
-    // Monet 动态取色：Android 12+ 取壁纸配色；可在设置中关闭，回退种子色
-    final useDynamic = ref.watch(
-          appSettingsProvider.select((s) => s.valueOrNull?.dynamicColor),
-        ) ??
-        true;
-    return DynamicColorBuilder(
-      builder: (lightDynamic, darkDynamic) {
-        return MaterialApp.router(
-          title: '藏星',
-          debugShowCheckedModeBanner: false,
-          theme: AppTheme.lightTheme(
-            dynamicScheme: useDynamic ? lightDynamic : null,
-          ),
-          darkTheme: AppTheme.darkTheme(
-            dynamicScheme: useDynamic ? darkDynamic : null,
-          ),
-          themeMode: ThemeMode.system,
-          routerConfig: _router,
+    final settings = ref.watch(appSettingsProvider);
+    return settings.when(
+      loading: () => MaterialApp(
+        title: '藏星',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.lightTheme(),
+        darkTheme: AppTheme.darkTheme(),
+        themeMode: ThemeMode.system,
+        home: const Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      ),
+      error: (e, _) => MaterialApp(
+        title: '藏星',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.lightTheme(),
+        darkTheme: AppTheme.darkTheme(),
+        themeMode: ThemeMode.system,
+        home: Scaffold(body: Center(child: Text('设置加载失败：$e'))),
+      ),
+      data: (s) {
+        final useDynamic = s.dynamicColor;
+        final mode = ThemeModeValue.fromInt(s.themeMode).toMaterial();
+        return DynamicColorBuilder(
+          builder: (lightDynamic, darkDynamic) {
+            return MaterialApp.router(
+              title: '藏星',
+              debugShowCheckedModeBanner: false,
+              theme: AppTheme.lightTheme(
+                dynamicScheme: useDynamic ? lightDynamic : null,
+              ),
+              darkTheme: AppTheme.darkTheme(
+                dynamicScheme: useDynamic ? darkDynamic : null,
+              ),
+              themeMode: mode,
+              routerConfig: _router,
+            );
+          },
         );
       },
     );

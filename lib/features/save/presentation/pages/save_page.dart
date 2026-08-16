@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fav_app/core/constants/app_constants.dart';
+import 'package:fav_app/core/utils/app_logger.dart';
 import 'package:fav_app/features/collections/data/models/category.dart';
 import 'package:fav_app/features/collections/data/providers/category_tree_provider.dart';
 import 'package:fav_app/features/collections/presentation/widgets/meta_edit_dialog.dart';
@@ -25,6 +27,23 @@ class SavePage extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<SavePage> createState() => _SavePageState();
+}
+
+class _ExtractBundle {
+  final String text;
+  final List<String> images;
+  final String author;
+  final String publishedAt;
+  final String title;
+  final List<String>? log;
+  const _ExtractBundle({
+    required this.text,
+    this.images = const [],
+    this.author = '',
+    this.publishedAt = '',
+    this.title = '',
+    this.log,
+  });
 }
 
 class _SavePageState extends ConsumerState<SavePage> {
@@ -53,6 +72,50 @@ class _SavePageState extends ConsumerState<SavePage> {
     _selectedType = TypeDetector.detectType(initialText, suggested: suggestType);
     _category = [AppConstants.defaultCategoryName];
     _saveOnlyRaw = false;
+
+    if (initialText.isEmpty) {
+      SharedPreferences.getInstance().then((p) {
+        final saved = p.getString('draft_raw_input');
+        final ts = p.getInt('draft_ts');
+        if (saved != null && ts != null) {
+          final diff = DateTime.now().millisecondsSinceEpoch - ts;
+          if (diff < const Duration(minutes: 30).inMilliseconds) {
+            if (!mounted) return;
+            showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('恢复草稿'),
+                content: Text('检测到 30 分钟内的编辑草稿，共 ${saved.length} 字。是否恢复？'),
+                actions: [
+                  TextButton(onPressed: () {
+                    Navigator.pop(ctx, false);
+                    p.remove('draft_raw_input');
+                    p.remove('draft_ts');
+                  }, child: const Text('丢弃')),
+                  FilledButton(onPressed: () {
+                    Navigator.pop(ctx, true);
+                  }, child: const Text('恢复')),
+                ],
+              ),
+            ).then((ok) {
+              if (!mounted) return;
+              if (ok == true) {
+                _rawInputCtrl.text = saved;
+                setState(() {
+                  _selectedType = TypeDetector.detectType(saved);
+                });
+              }
+              p.remove('draft_raw_input');
+              p.remove('draft_ts');
+            });
+          } else {
+            p.remove('draft_raw_input');
+            p.remove('draft_ts');
+          }
+        }
+      });
+    }
+
     // 每次进入保存页都重置转录状态：清掉上次会话的成功/失败条幅与日志
     Future.microtask(() {
       if (mounted) {
@@ -63,6 +126,13 @@ class _SavePageState extends ConsumerState<SavePage> {
 
   @override
   void dispose() {
+    if (_rawInputCtrl.text.trim().isNotEmpty) {
+      SharedPreferences.getInstance().then((p) {
+        p.setString('draft_raw_input', _rawInputCtrl.text);
+        p.setInt('draft_ts', DateTime.now().millisecondsSinceEpoch);
+      });
+    }
+    ref.read(saveControllerProvider.notifier).cancel();
     _rawInputCtrl.dispose();
     super.dispose();
   }
@@ -102,17 +172,47 @@ class _SavePageState extends ConsumerState<SavePage> {
     _rawInputCtrl.clear();
     ref.read(saveControllerProvider.notifier).reset();
     setState(() {
-      _selectedType = 'article';
+      _selectedType = CollectionEnums.typeToSql(CollectionType.article)!;
       _saveOnlyRaw = false;
       _category = [AppConstants.defaultCategoryName];
     });
     ref.read(saveControllerProvider.notifier).toggleSaveOnlyRaw(false);
   }
 
+  Future<String?> _tryDioFetch(String url) async {
+    try {
+      final fetched = await ref.read(webContentFetcherProvider).fetch(url);
+      if (fetched.text.trim().isNotEmpty) {
+        return fetched.text;
+      }
+    } catch (e, st) {
+      ref.read(appLoggerProvider).warn('SavePage', '抓取（Dio 直连）失败：$e', st);
+    }
+    return null;
+  }
+
+  Future<_ExtractBundle?> _tryWebViewFallback(String url) async {
+    if (!mounted) return null;
+    final extractor = HeadlessWebExtractor(
+      url: url,
+      cookies: ref.read(cookieListProvider).valueOrNull ?? const [],
+    );
+    final rendered = await extractor.start(context);
+    if (rendered != null && rendered.text.trim().isNotEmpty) {
+      return _ExtractBundle(
+        text: rendered.text,
+        images: rendered.images,
+        author: rendered.author,
+        publishedAt: rendered.publishedAt,
+        title: rendered.title,
+        log: rendered.log,
+      );
+    }
+    return null;
+  }
+
   Future<void> _doSave() async {
     final input = _rawInputCtrl.text;
-    // 若是链接且非仅存原文，先尝试抓取正文；抓不到（JS 渲染站点）则用
-    // 无头 WebView 后台渲染提取——全程不打开任何提取页面，用户无感
     String? preContent;
     var preImages = <String>[];
     var preAuthor = '';
@@ -120,29 +220,26 @@ class _SavePageState extends ConsumerState<SavePage> {
     var preTitle = '';
     List<String>? preExtractLog;
     final isUrl = WebContentFetcher.isLikelyUrl(input);
-    if (isUrl && !_saveOnlyRaw) {
+    final shouldTryWebview = isUrl && !_saveOnlyRaw;
+    if (shouldTryWebview) {
       setState(() => _extracting = true);
       try {
-        try {
-          final fetched = await ref.read(webContentFetcherProvider).fetch(input);
-          preContent = fetched.text;
-          preImages = fetched.images;
-          preAuthor = fetched.author;
-          prePublishedAt = fetched.publishedAt;
-        } catch (_) {
-          if (!mounted) return;
-          final extractor = HeadlessWebExtractor(
-            url: input,
-            cookies: ref.read(cookieListProvider),
-          );
-          final rendered = await extractor.start(context);
-          if (rendered != null && rendered.text.trim().isNotEmpty) {
-            preContent = rendered.text;
-            preImages = rendered.images;
-            preAuthor = rendered.author;
-            prePublishedAt = rendered.publishedAt;
-            preTitle = rendered.title;
-            preExtractLog = rendered.log;
+        final dioText = await _tryDioFetch(input);
+        if (dioText != null) {
+          preContent = dioText;
+          final svcFetched = await ref.read(webContentFetcherProvider).fetch(input);
+          preImages = svcFetched.images;
+          preAuthor = svcFetched.author;
+          prePublishedAt = svcFetched.publishedAt;
+        } else {
+          final wv = await _tryWebViewFallback(input);
+          if (wv != null) {
+            preContent = wv.text;
+            preImages = wv.images;
+            preAuthor = wv.author;
+            prePublishedAt = wv.publishedAt;
+            preTitle = wv.title;
+            preExtractLog = wv.log;
           }
         }
       } finally {
@@ -161,8 +258,6 @@ class _SavePageState extends ConsumerState<SavePage> {
           preFetchedPublishedAt: prePublishedAt,
           preFetchedTitle: preTitle,
           preExtractLog: preExtractLog,
-          // AI 标签仅是建议：转录完成后弹确认框让用户勾选；
-          // 文件夹由 AI 静默归一化自动应用，不在此显示
           onConfirmTags: (suggested, existing) async {
             if (!mounted) return suggested;
             return showTagConfirmDialog(
@@ -238,34 +333,48 @@ class _SavePageState extends ConsumerState<SavePage> {
 
     showDialog(
       context: context,
-      builder: (context) => SimpleDialog(
+      builder: (context) => AlertDialog(
         title: const Text('选择分类'),
-        children: [
-          ...tree.when(
-            data: (roots) {
-              final tiles = <Widget>[];
-              for (final node in roots) {
-                // 表里也有「未分类」，跳过避免与底部兜底项重复
-                if (node.category.name == AppConstants.defaultCategoryName) {
-                  continue;
-                }
-                _buildPathTiles(node, byId, tiles, depth: 0);
-              }
-              return tiles;
-            },
-            loading: () => [const SizedBox.shrink()],
-            error: (_, __) => [const SizedBox.shrink()],
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ...tree.when(
+                  data: (roots) {
+                    final tiles = <Widget>[];
+                    for (final node in roots) {
+                      // 表里也有「未分类」，跳过避免与底部兜底项重复
+                      if (node.category.name == AppConstants.defaultCategoryName) {
+                        continue;
+                      }
+                      _buildPathTiles(node, byId, tiles, depth: 0);
+                    }
+                    return tiles;
+                  },
+                  loading: () => [const SizedBox.shrink()],
+                  error: (_, __) => [const SizedBox.shrink()],
+                ),
+                // 「未分类」作为兜底放最后，不再排在文件夹前面
+                const Divider(height: 1),
+                ListTile(
+                  title: Text(AppConstants.defaultCategoryName),
+                  onTap: () {
+                    setState(() {
+                      _category = [AppConstants.defaultCategoryName];
+                    });
+                    context.pop();
+                  },
+                ),
+              ],
+            ),
           ),
-          // 「未分类」作为兜底放最后，不再排在文件夹前面
-          const Divider(height: 1),
-          ListTile(
-            title: Text(AppConstants.defaultCategoryName),
-            onTap: () {
-              setState(() {
-                _category = [AppConstants.defaultCategoryName];
-              });
-              context.pop();
-            },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
           ),
         ],
       ),
@@ -274,169 +383,243 @@ class _SavePageState extends ConsumerState<SavePage> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    ref.listen<AsyncValue<SaveState>>(saveControllerProvider, (prev, next) {
+      final prevUi = prev?.valueOrNull?.uiState;
+      final nextUi = next.valueOrNull?.uiState;
+      if (prevUi != SaveUiState.success && nextUi == SaveUiState.success) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final newId = next.valueOrNull?.lastCollectionId;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('收藏成功 ✓'),
+              behavior: SnackBarBehavior.floating,
+              action: newId == null
+                  ? null
+                  : SnackBarAction(
+                      label: '去查看',
+                      onPressed: () {
+                        context.go('/read/$newId');
+                      },
+                    ),
+            ),
+          );
+          Navigator.of(context).pop();
+        });
+      }
+    });
     return Scaffold(
       appBar: AppBar(
         title: const Text('保存收藏'),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // 输入框工具行：导入剪贴板 / 全部清除
-            Row(
+        child: ListenableBuilder(
+          listenable: _rawInputCtrl,
+          builder: (context, _) {
+            return Column(
               children: [
-                TextButton.icon(
-                  onPressed: _importClipboard,
-                  icon: const Icon(Icons.content_paste, size: 18),
-                  label: const Text('导入剪贴板'),
+                // 输入框工具行：导入剪贴板 / 全部清除
+                Row(
+                  children: [
+                    TextButton.icon(
+                      onPressed: _importClipboard,
+                      icon: const Icon(Icons.content_paste, size: 18),
+                      label: const Text('导入剪贴板'),
+                    ),
+                    const Spacer(),
+                    TextButton.icon(
+                      onPressed: _canSave || _saveOnlyRaw ? _clearAll : null,
+                      icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                      label: const Text('全部清除'),
+                      style: TextButton.styleFrom(
+                        foregroundColor:
+                            Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _rawInputCtrl,
+                    maxLines: null,
+                    expands: true,
+                    keyboardType: TextInputType.multiline,
+                    textAlignVertical: TextAlignVertical.top,
+                    decoration: const InputDecoration(
+                      hintText: '粘贴链接或文本...',
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
+                    ),
+                    onChanged: (_) {
+                      // 用户开始输入新内容时，自动收起上次结果（成功/失败）条幅，
+                      // 避免条幅常驻挡住输入区；需要复制日志/编辑信息请在此之前操作
+                      final st = ref.read(saveControllerProvider).valueOrNull;
+                      if (st != null &&
+                          st.uiState != SaveUiState.idle &&
+                          st.uiState != SaveUiState.processing) {
+                        ref.read(saveControllerProvider.notifier).reset();
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Text('类型：'),
+                    const SizedBox(width: 8),
+                    FilterChip(
+                      label: Text(CollectionEnums.typeLabel(CollectionType.article)),
+                      selected: _selectedType ==
+                          CollectionEnums.typeToSql(CollectionType.article),
+                      onSelected: (_) {
+                        setState(() {
+                          _selectedType =
+                              CollectionEnums.typeToSql(CollectionType.article)!;
+                        });
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    FilterChip(
+                      label: Text(CollectionEnums.typeLabel(CollectionType.comment)),
+                      selected: _selectedType ==
+                          CollectionEnums.typeToSql(CollectionType.comment),
+                      onSelected: (_) {
+                        setState(() {
+                          _selectedType =
+                              CollectionEnums.typeToSql(CollectionType.comment)!;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Text('分类：'),
+                    const SizedBox(width: 8),
+                    FilterChip(
+                      label: Text(_categoryLabel),
+                      selected: true,
+                      onSelected: (_) => _openCategoryPicker(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _saveOnlyRaw,
+                      onChanged: (v) {
+                        setState(() {
+                          _saveOnlyRaw = v ?? false;
+                        });
+                        ref
+                            .read(saveControllerProvider.notifier)
+                            .toggleSaveOnlyRaw(_saveOnlyRaw);
+                      },
+                    ),
+                    const Text('仅存原文稍后转录'),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (_extracting)
+                  Row(
+                    children: const [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text('正在后台提取网页内容...'),
+                      ),
+                    ],
+                  ),
+                Consumer(
+                  builder: (_, ref, __) {
+                    final st = ref.watch(saveControllerProvider).valueOrNull;
+                    if (st == null) return const SizedBox.shrink();
+                    final ui = st.uiState;
+                    return Column(
+                      children: [
+                        if (ui == SaveUiState.processing && st.progress != null)
+                          _ProgressBar(st.progress!),
+                        if (ui == SaveUiState.failed)
+                          _FailureInline(
+                            reason: st.failureReason,
+                            message: st.errorMessage,
+                            log: st.log,
+                            onRetry: _doSave,
+                            onEdit: st.lastCollectionId == null
+                                ? null
+                                : () => _openMetaEditor(st.lastCollectionId!),
+                          ),
+                        if (ui == SaveUiState.success)
+                          _SuccessInline(
+                            log: st.log,
+                            onEdit: st.lastCollectionId == null
+                                ? null
+                                : () => _openMetaEditor(st.lastCollectionId!),
+                          ),
+                      ],
+                    );
+                  },
                 ),
                 const Spacer(),
-                TextButton.icon(
-                  onPressed: _canSave || _saveOnlyRaw ? _clearAll : null,
-                  icon: const Icon(Icons.delete_sweep_outlined, size: 18),
-                  label: const Text('全部清除'),
-                  style: TextButton.styleFrom(
-                    foregroundColor:
-                        Theme.of(context).colorScheme.error,
-                  ),
-                ),
-              ],
-            ),
-            Expanded(
-              child: TextField(
-                controller: _rawInputCtrl,
-                maxLines: null,
-                expands: true,
-                keyboardType: TextInputType.multiline,
-                textAlignVertical: TextAlignVertical.top,
-                decoration: const InputDecoration(
-                  hintText: '粘贴链接或文本...',
-                  border: OutlineInputBorder(),
-                  alignLabelWithHint: true,
-                ),
-                onChanged: (_) {
-                  setState(() {});
-                  // 用户开始输入新内容时，自动收起上次结果（成功/失败）条幅，
-                  // 避免条幅常驻挡住输入区；需要复制日志/编辑信息请在此之前操作
-                  final st = ref.read(saveControllerProvider).valueOrNull;
-                  if (st != null &&
-                      st.uiState != SaveUiState.idle &&
-                      st.uiState != SaveUiState.processing) {
-                    ref.read(saveControllerProvider.notifier).reset();
-                  }
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('类型：'),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: const Text('文章'),
-                  selected: _selectedType == 'article',
-                  onSelected: (_) {
-                    setState(() {
-                      _selectedType = 'article';
-                    });
-                  },
-                ),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: const Text('评论'),
-                  selected: _selectedType == 'comment',
-                  onSelected: (_) {
-                    setState(() {
-                      _selectedType = 'comment';
-                    });
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('分类：'),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: Text(_categoryLabel),
-                  selected: true,
-                  onSelected: (_) => _openCategoryPicker(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Checkbox(
-                  value: _saveOnlyRaw,
-                  onChanged: (v) {
-                    setState(() {
-                      _saveOnlyRaw = v ?? false;
-                    });
-                    ref
-                        .read(saveControllerProvider.notifier)
-                        .toggleSaveOnlyRaw(_saveOnlyRaw);
-                  },
-                ),
-                const Text('仅存原文稍后转录'),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (_extracting)
-              Row(
-                children: const [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text('正在后台提取网页内容...'),
-                  ),
-                ],
-              ),
-            Consumer(
-              builder: (_, ref, __) {
-                final st = ref.watch(saveControllerProvider).valueOrNull;
-                if (st == null) return const SizedBox.shrink();
-                final ui = st.uiState;
-                return Column(
-                  children: [
-                    if (ui == SaveUiState.processing && st.progress != null)
-                      _ProgressBar(st.progress!),
-                    if (ui == SaveUiState.failed)
-                      _FailureInline(
-                        reason: st.failureReason,
-                        message: st.errorMessage,
-                        log: st.log,
-                        onRetry: _doSave,
-                        onEdit: st.lastCollectionId == null
-                            ? null
-                            : () => _openMetaEditor(st.lastCollectionId!),
+                Consumer(
+                  builder: (_, ref, __) {
+                    final st = ref.watch(saveControllerProvider).valueOrNull;
+                    final ui = st?.uiState;
+                    if (ui == SaveUiState.failed) {
+                      return Row(
+                        children: [
+                          Expanded(
+                            child: SizedBox(
+                              height: 48,
+                              child: FilledButton.icon(
+                                onPressed: () {
+                                  ref.read(saveControllerProvider.notifier).retryLast();
+                                },
+                                icon: const Icon(Icons.refresh),
+                                label: const Text('重试保存'),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: scheme.error,
+                                  foregroundColor: scheme.onError,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: SizedBox(
+                              height: 48,
+                              child: OutlinedButton(
+                                onPressed: () {
+                                  ref.read(saveControllerProvider.notifier).reset();
+                                },
+                                child: const Text('重新输入'),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    }
+                    return SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: FilledButton(
+                        onPressed: _canSave ? _doSave : null,
+                        child: const Text('保存'),
                       ),
-                    if (ui == SaveUiState.success)
-                      _SuccessInline(
-                        log: st.log,
-                        onEdit: st.lastCollectionId == null
-                            ? null
-                            : () => _openMetaEditor(st.lastCollectionId!),
-                      ),
-                  ],
-                );
-              },
-            ),
-            const Spacer(),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: FilledButton(
-                onPressed: _canSave ? _doSave : null,
-                child: const Text('保存'),
-              ),
-            ),
-          ],
+                    );
+                  },
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -482,9 +665,26 @@ class _ProgressBar extends StatelessWidget {
   }
 }
 
+Widget _logEntry(BuildContext context, String line) {
+  final scheme = Theme.of(context).colorScheme;
+  final isWarn = line.contains('⚠️');
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 1),
+    child: Text(
+      line,
+      style: TextStyle(
+        fontSize: 12,
+        fontFamily: 'monospace',
+        color: isWarn ? scheme.error : null,
+        fontWeight: isWarn ? FontWeight.w500 : null,
+      ),
+    ),
+  );
+}
+
 /// 失败内联提示：单行紧凑提示替代原大卡片条幅。
 /// 原文已由 controller 自动降级保存；详细日志通过复制带走。
-class _FailureInline extends StatelessWidget {
+class _FailureInline extends StatefulWidget {
   final TranscriptionFailureReason? reason;
   final String? message;
   final List<String> log;
@@ -499,15 +699,22 @@ class _FailureInline extends StatelessWidget {
     this.onEdit,
   });
 
+  @override
+  State<_FailureInline> createState() => _FailureInlineState();
+}
+
+class _FailureInlineState extends State<_FailureInline> {
+  bool _expanded = false;
+
   String _buildCopyText() {
     final buf = StringBuffer();
     buf.writeln('收藏 App 转录失败报告');
     buf.writeln('时间：${DateTime.now().toIso8601String()}');
-    buf.writeln('失败原因：${reason?.name ?? 'unknown'}');
-    buf.writeln('错误信息：${message ?? '无'}');
-    if (log.isNotEmpty) {
+    buf.writeln('失败原因：${widget.reason?.name ?? 'unknown'}');
+    buf.writeln('错误信息：${widget.message ?? '无'}');
+    if (widget.log.isNotEmpty) {
       buf.writeln('--- 转录日志 ---');
-      for (final l in log) {
+      for (final l in widget.log) {
         buf.writeln(l);
       }
     }
@@ -516,44 +723,80 @@ class _FailureInline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final msg = message ?? reason?.name ?? '未知错误';
-    return Row(
+    final msg = widget.message ?? widget.reason?.name ?? '未知错误';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(Icons.error_outline, size: 16, color: Colors.red.shade700),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            '转录失败：$msg（原文已保存）',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 13, color: Colors.red.shade700),
-          ),
+        Row(
+          children: [
+            Icon(Icons.error_outline, size: 16, color: Colors.red.shade700),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '转录失败：$msg（原文已保存）',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: Colors.red.shade700),
+              ),
+            ),
+            if (widget.log.isNotEmpty)
+              IconButton(
+                tooltip: _expanded ? '收起日志' : '查看转录日志',
+                icon: Icon(
+                  _expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                visualDensity: VisualDensity.compact,
+                onPressed: () {
+                  setState(() => _expanded = !_expanded);
+                },
+              ),
+            TextButton(
+              onPressed: widget.onRetry,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('重试'),
+            ),
+            if (widget.onEdit != null)
+              IconButton(
+                tooltip: '编辑收藏信息',
+                icon: const Icon(Icons.edit, size: 18),
+                visualDensity: VisualDensity.compact,
+                onPressed: widget.onEdit,
+              ),
+            IconButton(
+              tooltip: '复制转录日志',
+              icon: const Icon(Icons.copy, size: 18),
+              visualDensity: VisualDensity.compact,
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: _buildCopyText()));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('转录日志已复制')),
+                );
+              },
+            ),
+          ],
         ),
-        TextButton(
-          onPressed: onRetry,
-          style: TextButton.styleFrom(
-            visualDensity: VisualDensity.compact,
+        if (_expanded && widget.log.isNotEmpty)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            constraints: const BoxConstraints(maxHeight: 200),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final line in widget.log) _logEntry(context, line),
+                ],
+              ),
+            ),
           ),
-          child: const Text('重试'),
-        ),
-        if (onEdit != null)
-          IconButton(
-            tooltip: '编辑收藏信息',
-            icon: const Icon(Icons.edit, size: 18),
-            visualDensity: VisualDensity.compact,
-            onPressed: onEdit,
-          ),
-        IconButton(
-          tooltip: '复制转录日志',
-          icon: const Icon(Icons.copy, size: 18),
-          visualDensity: VisualDensity.compact,
-          onPressed: () {
-            Clipboard.setData(ClipboardData(text: _buildCopyText()));
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('转录日志已复制')),
-            );
-          },
-        ),
       ],
     );
   }
@@ -561,19 +804,26 @@ class _FailureInline extends StatelessWidget {
 
 /// 成功内联提示：单行紧凑提示替代原大卡片条幅，与失败提示形式一致。
 /// 日志详情通过复制带走；保存的收藏可点「编辑」补全元信息。
-class _SuccessInline extends StatelessWidget {
+class _SuccessInline extends StatefulWidget {
   final List<String> log;
   final VoidCallback? onEdit;
 
   const _SuccessInline({required this.log, this.onEdit});
 
+  @override
+  State<_SuccessInline> createState() => _SuccessInlineState();
+}
+
+class _SuccessInlineState extends State<_SuccessInline> {
+  bool _expanded = false;
+
   String _buildCopyText() {
     final buf = StringBuffer();
     buf.writeln('收藏 App 转录成功报告');
     buf.writeln('时间：${DateTime.now().toIso8601String()}');
-    if (log.isNotEmpty) {
+    if (widget.log.isNotEmpty) {
       buf.writeln('--- 转录日志 ---');
-      for (final l in log) {
+      for (final l in widget.log) {
         buf.writeln(l);
       }
     }
@@ -582,40 +832,76 @@ class _SuccessInline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(Icons.check_circle, size: 16, color: Colors.green.shade700),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            '转录成功，已入库',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
-              color: Colors.green.shade700,
+        Row(
+          children: [
+            Icon(Icons.check_circle, size: 16, color: Colors.green.shade700),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '转录成功，已入库',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.green.shade700,
+                ),
+              ),
             ),
-          ),
-        ),
-        if (onEdit != null)
-          TextButton(
-            onPressed: onEdit,
-            style: TextButton.styleFrom(
+            if (widget.log.isNotEmpty)
+              IconButton(
+                tooltip: _expanded ? '收起日志' : '查看转录日志',
+                icon: Icon(
+                  _expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                visualDensity: VisualDensity.compact,
+                onPressed: () {
+                  setState(() => _expanded = !_expanded);
+                },
+              ),
+            if (widget.onEdit != null)
+              TextButton(
+                onPressed: widget.onEdit,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                child: const Text('编辑'),
+              ),
+            IconButton(
+              tooltip: '复制转录日志',
+              icon: const Icon(Icons.copy, size: 18),
               visualDensity: VisualDensity.compact,
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: _buildCopyText()));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('转录日志已复制')),
+                );
+              },
             ),
-            child: const Text('编辑'),
-          ),
-        IconButton(
-          tooltip: '复制转录日志',
-          icon: const Icon(Icons.copy, size: 18),
-          visualDensity: VisualDensity.compact,
-          onPressed: () {
-            Clipboard.setData(ClipboardData(text: _buildCopyText()));
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('转录日志已复制')),
-            );
-          },
+          ],
         ),
+        if (_expanded && widget.log.isNotEmpty)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            constraints: const BoxConstraints(maxHeight: 200),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final line in widget.log) _logEntry(context, line),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }

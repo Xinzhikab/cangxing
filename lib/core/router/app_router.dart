@@ -11,11 +11,13 @@ import 'package:fav_app/features/read/presentation/pages/article_chat_page.dart'
 import 'package:fav_app/features/read/presentation/pages/read_page.dart';
 import 'package:fav_app/features/save/presentation/pages/save_page.dart';
 import 'package:fav_app/features/settings/data/providers/app_settings_provider.dart';
+import 'package:fav_app/features/settings/presentation/pages/about_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/cookies_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/list_style_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/llm_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/smtp_settings_page.dart';
+import 'package:fav_app/features/settings/presentation/pages/trash_page.dart';
 
 class AppRouter {
   static GoRouter createRouter(WidgetRef ref) {
@@ -91,6 +93,14 @@ class AppRouter {
                     GoRoute(
                       path: 'smtp',
                       builder: (context, state) => const SmtpSettingsPage(),
+                    ),
+                    GoRoute(
+                      path: 'trash',
+                      builder: (context, state) => const TrashPage(),
+                    ),
+                    GoRoute(
+                      path: 'about',
+                      builder: (context, state) => const AboutPage(),
                     ),
                   ],
                 ),

@@ -1,15 +1,28 @@
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/features/collections/data/models/collection.dart';
 import 'package:fav_app/features/collections/data/models/collection_note.dart';
 
 abstract class CollectionRepository {
   Future<List<Collection>> list({
     List<String>? categoryPath,
-    String? platform,
+    SourcePlatform? platform,
     String? author,
-    String? status,
+    CollectionStatus? status,
     String? tag,
-    String? sortBy,
+    CollectionSortField sortBy = CollectionSortField.collectedAt,
     bool descending = true,
+    bool pinnedOnly = false,
+  });
+
+  Future<List<Collection>> listMetaOnly({
+    List<String>? categoryPath,
+    SourcePlatform? platform,
+    String? author,
+    CollectionStatus? status,
+    String? tag,
+    CollectionSortField sortBy = CollectionSortField.collectedAt,
+    bool descending = true,
+    bool pinnedOnly = false,
   });
 
   Future<Collection?> get(String id);
@@ -20,6 +33,24 @@ abstract class CollectionRepository {
 
   Future<void> delete(String id);
 
+  /// 回收站：列出所有已软删除的收藏（按删除时间倒序，仅 meta）。
+  Future<List<Collection>> listTrashed();
+
+  /// 回收站：恢复一条软删除的收藏（清除 deleted_at，重建 FTS 索引）。
+  Future<void> restore(String id);
+
+  /// 回收站：彻底删除——删 DB 行 + FTS + meta/content/images 文件。
+  Future<void> permanentDelete(String id);
+
+  /// 回收站：清空回收站（对所有已删除项执行 permanentDelete）。
+  Future<void> emptyTrash();
+
+  /// 置顶切换：已置顶 → 取消置顶；未置顶 → 置顶（置顶时间=now）。
+  Future<void> togglePin(String id);
+
+  /// 批量置顶 / 取消置顶（pinned=true 全置顶，pinned=false 全不置顶）。
+  Future<void> setPinnedBatch(List<String> ids, {required bool pinned});
+
   Future<List<Collection>> search(String keyword, {int limit = 50});
 
   Future<List<Map<String, int>>> groupByPlatform();
@@ -28,22 +59,20 @@ abstract class CollectionRepository {
 
   Future<List<Map<String, int>>> groupByStatus();
 
-  /// 评论区模式：按时间倒序返回某篇文章的全部笔记
   Future<List<CollectionNote>> listNotes(String collectionId);
 
   Future<CollectionNote> addNote(CollectionNote note);
 
   Future<void> deleteNote(String id);
 
-  /// 标签注册表：手动创建的标签名列表（按名称排序）。
   Future<List<String>> listTags();
 
-  /// 注册一个新标签名（已存在则忽略）。
+  @Deprecated('tags 注册表已废弃，此方法 no-op')
   Future<void> addTag(String name);
 
-  /// 删除标签：从注册表移除，并从所有收藏中剥离该标签。
+  @Deprecated('tags 注册表已废弃，仅同步 collections.tags_json 列')
   Future<void> deleteTag(String name);
 
-  /// 重命名标签：更新注册表，并同步所有收藏中的该标签。
+  @Deprecated('tags 注册表已废弃，仅同步 collections.tags_json 列')
   Future<void> renameTag(String oldName, String newName);
 }

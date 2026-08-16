@@ -45,8 +45,8 @@ void main() {
     final collection = Collection(
       id: 'test-id-001',
       title: 'Flutter 异步编程指南',
-      type: CollectionType.article,
-      sourcePlatform: SourcePlatform.coolapk,
+      type: CollectionEnums.typeToSql(CollectionType.article)!,
+      sourcePlatform: CollectionEnums.platformToSql(SourcePlatform.coolapk)!,
       sourceUrl: 'https://www.coolapk.com/article/12345',
       author: '数码爱好者',
       publishedAt: DateTime(2026, 8, 10),
@@ -54,7 +54,7 @@ void main() {
       category: ['技术', 'Flutter'],
       images: ['images/test-id-001/img_001.jpg'],
       note: '这篇讲得很好',
-      status: CollectionStatus.unread,
+      status: CollectionEnums.statusToSql(CollectionStatus.unread)!,
       rawInput: '原始文本内容',
       contentMd: '# 标题\n正文内容',
     );
@@ -63,10 +63,10 @@ void main() {
       final json = collection.toJson();
       expect(json['id'], 'test-id-001');
       expect(json['title'], 'Flutter 异步编程指南');
-      expect(json['type'], CollectionType.article);
-      expect(json['sourcePlatform'], SourcePlatform.coolapk);
+      expect(json['type'], CollectionEnums.typeToSql(CollectionType.article));
+      expect(json['sourcePlatform'], CollectionEnums.platformToSql(SourcePlatform.coolapk));
       expect(json['author'], '数码爱好者');
-      expect(json['status'], CollectionStatus.unread);
+      expect(json['status'], CollectionEnums.statusToSql(CollectionStatus.unread));
       expect(json['contentMd'], '# 标题\n正文内容');
       expect(json['category'], ['技术', 'Flutter']);
       expect(json['images'].length, 1);
@@ -90,11 +90,11 @@ void main() {
 
     test('copyWith 部分更新', () {
       final updated = collection.copyWith(
-        status: CollectionStatus.learning,
+        status: CollectionEnums.statusToSql(CollectionStatus.learning)!,
         reviewDueAt: DateTime(2026, 8, 14),
         note: '更新后的笔记',
       );
-      expect(updated.status, CollectionStatus.learning);
+      expect(updated.status, CollectionEnums.statusToSql(CollectionStatus.learning));
       expect(updated.reviewDueAt, DateTime(2026, 8, 14));
       expect(updated.note, '更新后的笔记');
       // 未改动的字段保持原值
@@ -110,14 +110,14 @@ void main() {
       final minimal = Collection(
         id: 'min',
         title: '最小',
-        type: CollectionType.article,
-        sourcePlatform: SourcePlatform.other,
+        type: CollectionEnums.typeToSql(CollectionType.article)!,
+        sourcePlatform: CollectionEnums.platformToSql(SourcePlatform.other)!,
         sourceUrl: '',
         author: '',
         category: [],
         images: [],
         note: '',
-        status: CollectionStatus.unread,
+        status: CollectionEnums.statusToSql(CollectionStatus.unread)!,
         rawInput: '',
       );
       expect(minimal.contentMd, '');

@@ -23,29 +23,28 @@ class _CollectionsShellState extends ConsumerState<CollectionsShell> {
   /// 上次已提示过的剪贴板内容：同一链接不重复弹窗（阅读 App 同款策略）
   static String? _lastPromptedClipboard;
 
+  /// 保证 pendingShareExtra listener 只注册一次（防止热重载重复注册）
+  bool _listenerRegistered = false;
+  bool _clipboardChecked = false;
+
   @override
   void initState() {
     super.initState();
+    // 注意：ref.listen 必须在 build 方法内部调用（Riverpod 断言约束）。
+    // initState 仅做启动时的一次性剪贴板检测（这部分用 ref.read 就够）。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // 分享进入时剪贴板往往就是分享的那条链接，跳过检测避免双重弹窗；
-      // 设置中关闭「剪贴板链接检测」则完全不检测
+      if (!mounted) return;
       final clipboardDetection = ref
               .read(appSettingsProvider)
               .valueOrNull
               ?.clipboardDetection ??
           true;
       if (clipboardDetection &&
+          !_clipboardChecked &&
           ref.read(pendingShareExtraProvider) == null) {
+        _clipboardChecked = true;
         _checkClipboard();
       }
-      ref.listen<Object?>(pendingShareExtraProvider, (prev, next) {
-        if (next != null) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            GoRouter.of(context).push('/save', extra: next);
-          });
-          ref.read(pendingShareExtraProvider.notifier).state = null;
-        }
-      });
     });
   }
 
@@ -88,6 +87,16 @@ class _CollectionsShellState extends ConsumerState<CollectionsShell> {
 
   @override
   Widget build(BuildContext context) {
+    // Riverpod 允许的 ref.listen 注册位置：build 方法内
+    ref.listen<Object?>(pendingShareExtraProvider, (prev, next) {
+      if (next != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          GoRouter.of(context).push('/save', extra: next);
+        });
+        ref.read(pendingShareExtraProvider.notifier).state = null;
+      }
+    });
     return Scaffold(
       body: widget.navigationShell,
       bottomNavigationBar: NavigationBar(

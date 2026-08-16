@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/core/constants/category_templates.dart';
 import 'package:fav_app/features/collections/data/models/category.dart';
 import 'package:fav_app/features/collections/data/providers/category_repository_provider.dart';
@@ -29,9 +30,6 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: _modes.length, vsync: this);
-    _tabCtrl.addListener(() {
-      if (mounted) setState(() {});
-    });
   }
 
   @override
@@ -86,7 +84,6 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
                 sortOrder: siblings.length,
                 createdAt: DateTime.now(),
               ));
-              ref.invalidate(categoryListProvider);
               ref.invalidate(categoriesListProvider);
               ref.invalidate(collectionsListProvider);
               if (ctx.mounted) Navigator.pop(ctx);
@@ -119,7 +116,6 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
               if (nameCtrl.text.trim().isEmpty) return;
               final repo = ref.read(categoryRepositoryProvider);
               await repo.update(cat.copyWith(name: nameCtrl.text.trim()));
-              ref.invalidate(categoryListProvider);
               ref.invalidate(categoriesListProvider);
               ref.invalidate(collectionsListProvider);
               if (ctx.mounted) Navigator.pop(ctx);
@@ -187,7 +183,6 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
         Navigator.of(dialogCtx!).pop();
       }
     }
-    ref.invalidate(categoryListProvider);
     ref.invalidate(categoriesListProvider);
     ref.invalidate(collectionsListProvider);
     // 不要 pop 页面：分类页是 shell 分支根路由，弹出会导致黑屏
@@ -256,7 +251,6 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
                   ref.read(categoryRepositoryProvider),
                   selected,
                 );
-                ref.invalidate(categoryListProvider);
                 ref.invalidate(categoriesListProvider);
                 if (ctx.mounted) {
                   Navigator.pop(ctx);
@@ -396,12 +390,10 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
   }
 
   static String _platformLabel(String k) =>
-      {'douyin': '抖音', 'xiaoheihe': '小黑盒', 'coolapk': '酷安', 'other': '其他'}[
-          k] ??
-      k;
+      CollectionEnums.platformLabel(CollectionEnums.platformFromSql(k));
 
   Widget _buildFolderBody(WidgetRef ref) {
-    final catsAsync = ref.watch(categoryListProvider);
+    final catsAsync = ref.watch(categoriesListProvider);
     return catsAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, _) => Center(child: Text('错误: $e')),
@@ -520,20 +512,16 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
         if (platforms.isEmpty) {
           return const Center(child: Text('暂无收藏'));
         }
-        final icons = <String, IconData>{
-          'douyin': Icons.music_note,
-          'xiaoheihe': Icons.sports_esports,
-          'coolapk': Icons.phone_android,
-          'other': Icons.public,
-        };
         return ListView.builder(
           itemCount: platforms.length,
           itemBuilder: (_, i) {
             final m = platforms[i];
             final key = m.keys.first;
             final cnt = m.values.first;
+            final platformEnum = CollectionEnums.platformFromSql(key);
             return ListTile(
-              leading: Icon(icons[key] ?? Icons.public, color: Colors.indigo),
+              leading: Icon(CollectionEnums.platformIcon(platformEnum),
+                  color: Colors.indigo),
               title: Text(_platformLabel(key)),
               subtitle: Text('$cnt 篇'),
               trailing: const Icon(Icons.chevron_right),
@@ -582,55 +570,60 @@ class _CategoriesPageState extends ConsumerState<CategoriesPage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('分类'),
-        actions: [
-          if (_mode == 'folder') ...[
-            IconButton(
-              icon: const Icon(Icons.auto_awesome_outlined),
-              tooltip: '导入推荐模板',
-              onPressed: () => _importTemplateDialog(context, ref),
-            ),
-            IconButton(
-              icon: const Icon(Icons.add),
-              tooltip: '新建文件夹',
-              onPressed: () => _createDialog(context, ref),
-            ),
-          ],
-          if (_mode == 'tag')
-            IconButton(
-              icon: const Icon(Icons.add),
-              tooltip: '新建标签',
-              onPressed: () => _createTagDialog(context, ref),
-            ),
-        ],
-      ),
-      body: Column(
-        children: [
-          TabBar(
-            controller: _tabCtrl,
-            tabs: const [
-              Tab(icon: Icon(Icons.folder), text: '收藏'),
-              Tab(icon: Icon(Icons.tag), text: '标签'),
-              Tab(icon: Icon(Icons.public), text: '平台'),
-              Tab(icon: Icon(Icons.person), text: '作者'),
+    return ListenableBuilder(
+      listenable: _tabCtrl,
+      builder: (context, _) {
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('分类'),
+            actions: [
+              if (_mode == 'folder') ...[
+                IconButton(
+                  icon: const Icon(Icons.auto_awesome_outlined),
+                  tooltip: '导入推荐模板',
+                  onPressed: () => _importTemplateDialog(context, ref),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.add),
+                  tooltip: '新建文件夹',
+                  onPressed: () => _createDialog(context, ref),
+                ),
+              ],
+              if (_mode == 'tag')
+                IconButton(
+                  icon: const Icon(Icons.add),
+                  tooltip: '新建标签',
+                  onPressed: () => _createTagDialog(context, ref),
+                ),
             ],
           ),
-          Expanded(
-            // TabBarView：左右滑动切换分类维度
-            child: TabBarView(
-              controller: _tabCtrl,
-              children: [
-                Consumer(builder: (_, ref, __) => _buildFolderBody(ref)),
-                Consumer(builder: (_, ref, __) => _buildTagBody(ref)),
-                Consumer(builder: (_, ref, __) => _buildPlatformBody(ref)),
-                Consumer(builder: (_, ref, __) => _buildAuthorBody(ref)),
-              ],
-            ),
+          body: Column(
+            children: [
+              TabBar(
+                controller: _tabCtrl,
+                tabs: const [
+                  Tab(icon: Icon(Icons.folder), text: '收藏'),
+                  Tab(icon: Icon(Icons.tag), text: '标签'),
+                  Tab(icon: Icon(Icons.public), text: '平台'),
+                  Tab(icon: Icon(Icons.person), text: '作者'),
+                ],
+              ),
+              Expanded(
+                // TabBarView：左右滑动切换分类维度
+                child: TabBarView(
+                  controller: _tabCtrl,
+                  children: [
+                    Consumer(builder: (_, ref, __) => _buildFolderBody(ref)),
+                    Consumer(builder: (_, ref, __) => _buildTagBody(ref)),
+                    Consumer(builder: (_, ref, __) => _buildPlatformBody(ref)),
+                    Consumer(builder: (_, ref, __) => _buildAuthorBody(ref)),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

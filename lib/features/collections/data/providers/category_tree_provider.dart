@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fav_app/features/collections/data/models/category.dart';
 import 'package:fav_app/features/collections/data/providers/category_repository_provider.dart';
+import 'package:fav_app/features/collections/data/providers/collections_refresh_provider.dart';
 
 class CategoryNode {
   final Category category;
@@ -14,12 +15,6 @@ class CategoryNode {
   int get totalDescendantCount =>
       children.fold(0, (sum, c) => sum + 1 + c.totalDescendantCount);
 }
-
-final categoryListProvider = FutureProvider<List<Category>>((ref) async {
-  final repo = ref.watch(categoryRepositoryProvider);
-  await repo.ready;
-  return repo.listAll();
-});
 
 List<({Category cat, int level})> buildTreeView(
   List<Category> all, {
@@ -38,6 +33,7 @@ List<({Category cat, int level})> buildTreeView(
 }
 
 final categoriesListProvider = FutureProvider<List<Category>>((ref) async {
+  ref.watch(collectionsRefreshProvider);
   final repo = ref.watch(categoryRepositoryProvider);
   await repo.ready;
   return repo.listAll();
@@ -65,3 +61,6 @@ final categoryTreeProvider = Provider<AsyncValue<List<CategoryNode>>>((ref) {
 
 final selectedCategoryPathProvider =
     StateProvider<List<String>>((ref) => []);
+
+@Deprecated('Use categoriesListProvider instead')
+final categoryListProvider = categoriesListProvider;

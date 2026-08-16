@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:fav_app/features/collections/data/models/collection.dart';
 import 'package:fav_app/features/collections/data/providers/collections_list_controller.dart';
 import 'package:fav_app/features/collections/data/providers/collection_repository_provider.dart';
@@ -11,35 +12,149 @@ import 'package:fav_app/features/settings/data/providers/app_settings_provider.d
 import 'package:fav_app/features/learning/data/providers/learning_queue_provider.dart';
 import 'package:fav_app/features/learning/data/services/reminder_scheduler.dart';
 
-class LearningPage extends ConsumerWidget {
+class LearningPage extends ConsumerStatefulWidget {
   const LearningPage({super.key});
 
-  String _platformLabel(String? platform) {
-    switch (platform) {
-      case SourcePlatform.douyin:
-        return '抖音';
-      case SourcePlatform.xiaoheihe:
-        return '小黑盒';
-      case SourcePlatform.coolapk:
-        return '酷安';
-      default:
-        return '其他';
-    }
+  @override
+  ConsumerState<LearningPage> createState() => _LearningPageState();
+}
+
+class _LearningPageState extends ConsumerState<LearningPage> {
+  final TextEditingController _customDaysCtrl = TextEditingController();
+  final ScrollController _pageCtrl = ScrollController();
+  int? _pickedCustomDays;
+
+  @override
+  void dispose() {
+    _customDaysCtrl.dispose();
+    _pageCtrl.dispose();
+    super.dispose();
   }
 
-  String _statusLabel(String? status) {
-    switch (status) {
-      case CollectionStatus.learning:
-        return '想学';
-      case CollectionStatus.done:
-        return '完成';
-      default:
-        return '其他';
+  String _platformLabel(String? platform) =>
+      CollectionEnums.platformLabel(CollectionEnums.platformFromSql(platform));
+
+  String _statusLabel(String? status) =>
+      CollectionEnums.statusLabel(CollectionEnums.statusFromSql(status));
+
+  Future<int?> _pickReviewInterval(BuildContext ctx) async {
+    _customDaysCtrl.clear();
+    _pickedCustomDays = null;
+    return showDialog<int>(
+      context: ctx,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => SimpleDialog(
+          title: const Text('再学一次，几天后复习？'),
+          children: [
+            ...[1, 3, 7, 14, 30].map((d) => RadioListTile<int>(
+              value: d,
+              groupValue: _pickedCustomDays,
+              onChanged: (v) => setDlgState(() => _pickedCustomDays = v),
+              title: Text('$d 天后'),
+            )),
+            RadioListTile<int>(
+              value: -1,
+              groupValue: _pickedCustomDays,
+              onChanged: (v) => setDlgState(() => _pickedCustomDays = v),
+              title: TextField(
+                controller: _customDaysCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '自定义天数'),
+                onChanged: (_) => setDlgState(() {}),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextButton.icon(
+                icon: const Icon(Icons.event),
+                label: const Text('选具体日期'),
+                onPressed: () async {
+                  final d = await showDatePicker(
+                    context: ctx,
+                    initialDate: DateTime.now().add(const Duration(days: 1)),
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime.now().add(const Duration(days: 365)),
+                  );
+                  if (d != null) {
+                    final now = DateTime.now();
+                    final diff = DateTime(d.year, d.month, d.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+                    if (mounted) Navigator.pop(ctx, diff < 0 ? 0 : diff);
+                  }
+                },
+              ),
+            ),
+            SimpleDialogOption(
+              onPressed: () {
+                int? result;
+                if (_pickedCustomDays == null) {
+                  result = null;
+                } else if (_pickedCustomDays == -1) {
+                  result = int.tryParse(_customDaysCtrl.text.trim());
+                } else {
+                  result = _pickedCustomDays;
+                }
+                Navigator.pop(ctx, result);
+              },
+              child: const Align(
+                alignment: Alignment.centerRight,
+                child: Text('确定', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _markDone(Collection c, LearningGroup g, List<Collection> list, int index) async {
+    final repo = ref.read(collectionRepositoryProvider);
+    await repo.update(c.copyWith(
+      status: CollectionEnums.statusToSql(CollectionStatus.done)!,
+      reviewDueAt: null,
+    ));
+    HapticFeedback.lightImpact();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已完成 ✓'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(milliseconds: 800),
+        ),
+      );
     }
+    if ((g == LearningGroup.overdue || g == LearningGroup.today) &&
+        index < list.length - 1) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      if (_pageCtrl.hasClients) {
+        await _pageCtrl.animateTo(
+          _pageCtrl.offset + 72,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    }
+    ref.invalidate(learningQueueProvider);
+    ref.invalidate(collectionsListProvider);
+  }
+
+  Future<void> _markAllDone(List<Collection> list) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('正在标记 ${list.length} 项为已完成…'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+    final repo = ref.read(collectionRepositoryProvider);
+    await Future.wait(list.map((c) => repo.update(c.copyWith(
+          status: CollectionEnums.statusToSql(CollectionStatus.done)!,
+          reviewDueAt: null,
+        ))));
+    ref.invalidate(learningQueueProvider);
+    ref.invalidate(collectionsListProvider);
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('想学'),
@@ -92,6 +207,7 @@ class LearningPage extends ConsumerWidget {
                 );
               }
               return ListView(
+                controller: _pageCtrl,
                 children: [
                   for (final g in order)
                     ..._buildSection(
@@ -110,15 +226,28 @@ class LearningPage extends ConsumerWidget {
     if (list.isEmpty) return;
     yield Padding(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-      child: Text(
-        '$title (${list.length})',
-        style: Theme.of(context)
-            .textTheme
-            .titleMedium
-            ?.copyWith(fontWeight: FontWeight.bold),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            '$title (${list.length})',
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(fontWeight: FontWeight.bold),
+          ),
+          if (g == LearningGroup.overdue || g == LearningGroup.today)
+            TextButton.icon(
+              icon: const Icon(Icons.done_all_outlined, size: 16),
+              label: const Text('全部完成'),
+              onPressed: () => _markAllDone(list),
+            ),
+        ],
       ),
     );
-    for (final c in list)
+    for (var i = 0; i < list.length; i++) {
+      final c = list[i];
+      final scheme = Theme.of(context).colorScheme;
       yield Card(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         child: ListTile(
@@ -130,54 +259,62 @@ class LearningPage extends ConsumerWidget {
           subtitle: Text(
               '${_platformLabel(c.sourcePlatform)} · ${c.reviewDueAt == null ? '—' : DateFormat('MM-dd HH:mm').format(c.reviewDueAt!)}'),
           leading: CircleAvatar(child: Text(_statusLabel(c.status)[0])),
-          trailing: PopupMenuButton<String>(
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'read', child: Text('去翻看')),
-              PopupMenuItem(value: 'again', child: Text('再学一次')),
-              PopupMenuItem(value: 'done', child: Text('标已完成')),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(Icons.check_circle_outline, color: scheme.primary),
+                tooltip: '已完成',
+                onPressed: () => _markDone(c, g, list, i),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.menu_book_outlined),
+                tooltip: '翻看',
+                onPressed: () => context.push('/read/${c.id}?fromLearning=true'),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.repeat_outlined),
+                tooltip: '再学一次',
+                onPressed: () async {
+                  final repo = ref.read(collectionRepositoryProvider);
+                  final days = await _pickReviewInterval(context);
+                  if (days == null) return;
+                  final newDue = DateTime.now().add(Duration(days: days));
+                  final updated = c.copyWith(
+                      status: CollectionEnums.statusToSql(CollectionStatus.learning)!,
+                      reviewDueAt: newDue);
+                  await repo.update(updated);
+                  final settings = ref.read(appSettingsProvider).valueOrNull;
+                  if (settings != null) {
+                    final scheduler = await ReminderScheduler.fromSettings(settings);
+                    await scheduler.cancel(c.id);
+                    await scheduler.schedule(updated, newDue);
+                  }
+                  ref.invalidate(learningQueueProvider);
+                  ref.invalidate(collectionsListProvider);
+                },
+              ),
+              const SizedBox(width: 4),
+              PopupMenuButton<String>(
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'open', child: Text('查看原链接')),
+                ],
+                onSelected: (v) async {
+                  if (v == 'open' && c.sourceUrl.isNotEmpty) {
+                    await launchUrl(
+                      Uri.parse(c.sourceUrl),
+                      mode: LaunchMode.externalApplication,
+                    );
+                  }
+                },
+              ),
             ],
-            onSelected: (v) async {
-              final repo = ref.read(collectionRepositoryProvider);
-              if (v == 'read') {
-                context.push('/read/${c.id}');
-                return;
-              }
-              if (v == 'done') {
-                await repo.update(c.copyWith(
-                    status: CollectionStatus.done, reviewDueAt: null));
-              }
-              if (v == 'again') {
-                final days = await showDialog<int>(
-                  context: context,
-                  builder: (ctx) => SimpleDialog(
-                    title: const Text('再学一次，几天后复习？'),
-                    children: [1, 3, 7, 14, 30]
-                        .map((d) => SimpleDialogOption(
-                              onPressed: () => Navigator.pop(ctx, d),
-                              child: Text('$d 天后'),
-                            ))
-                        .toList(),
-                  ),
-                );
-                if (days == null) return;
-                final newDue = DateTime.now().add(Duration(days: days));
-                final updated = c.copyWith(
-                    status: CollectionStatus.learning, reviewDueAt: newDue);
-                await repo.update(updated);
-                final settings = ref.read(appSettingsProvider).valueOrNull;
-                if (settings != null) {
-                  final scheduler = ReminderScheduler(
-                      settings, FlutterLocalNotificationsPlugin());
-                  await scheduler.cancel(c.id);
-                  await scheduler.schedule(updated, newDue);
-                }
-              }
-              ref.invalidate(learningQueueProvider);
-              ref.invalidate(collectionsListProvider);
-            },
           ),
           onTap: () => context.push('/read/${c.id}'),
         ),
       );
+    }
   }
 }

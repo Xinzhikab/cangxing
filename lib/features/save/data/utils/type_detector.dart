@@ -1,15 +1,17 @@
+import 'package:fav_app/core/constants/app_constants.dart';
+
 class TypeDetector {
   static String detectType(String rawInput, {String? suggested}) {
     if (suggested != null && suggested.isNotEmpty) {
-      return suggested;
+      return CollectionEnums.typeToSql(CollectionEnums.typeFromSql(suggested))!;
     }
 
     final trimmed = rawInput.trim();
 
     if (trimmed.contains('回复@') || trimmed.contains('// @')) {
-      return 'comment';
+      return CollectionEnums.typeToSql(CollectionType.comment)!;
     }
 
-    return 'article';
+    return CollectionEnums.typeToSql(CollectionType.article)!;
   }
 }

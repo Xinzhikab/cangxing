@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:fav_app/core/utils/app_logger.dart';
 import 'package:fav_app/features/save/data/models/transcription_models.dart';
 
 class LlmConfig {
@@ -17,56 +19,103 @@ class LlmConfig {
 
 class LlmClient {
   final Dio dio;
+  final AppLogger _logger;
 
-  LlmClient(this.dio);
+  LlmClient(this.dio, this._logger);
 
-  /// 查询服务商可用模型列表（OpenAI 兼容接口 GET /models）。
-  Future<List<String>> fetchModels({
-    required LlmConfig config,
-    Duration timeout = const Duration(seconds: 15),
+  String _buildUrl(String base, String endpoint) {
+    return base.endsWith('/') ? '$base$endpoint' : '$base/$endpoint';
+  }
+
+  Future<Response<T>> _request<T>(
+    String method,
+    LlmConfig config,
+    String endpoint, {
+    Map<String, dynamic>? body,
+    Map<String, dynamic>? extraHeaders,
+    Duration timeout = const Duration(seconds: 60),
   }) async {
-    final url = config.baseUrl.endsWith('/')
-        ? '${config.baseUrl}models'
-        : '${config.baseUrl}/models';
-
-    final originalHeaders = Map<String, dynamic>.from(dio.options.headers);
+    final url = _buildUrl(config.baseUrl, endpoint);
+    final headers = <String, dynamic>{
+      'Authorization': 'Bearer ${config.apiKey}',
+    };
+    if (method == 'POST') {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (extraHeaders != null) {
+      headers.addAll(extraHeaders);
+    }
     try {
-      dio.options.headers['Authorization'] = 'Bearer ${config.apiKey}';
-      final resp = await dio.get<dynamic>(url).timeout(timeout);
-      dio.options.headers = originalHeaders;
-
-      final data = resp.data;
-      if (data is Map<String, dynamic> && data['data'] is List) {
-        final ids = (data['data'] as List)
-            .whereType<Map>()
-            .map((m) => m['id']?.toString() ?? '')
-            .where((s) => s.isNotEmpty)
-            .toList();
-        ids.sort();
-        return ids;
-      }
-      return [];
-    } on TimeoutException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } on DioException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } catch (e) {
-      dio.options.headers = originalHeaders;
+      final resp = await dio.request<T>(
+        url,
+        options: Options(
+          method: method,
+          headers: headers,
+          connectTimeout: const Duration(seconds: 10),
+          sendTimeout: timeout,
+          receiveTimeout: timeout,
+        ),
+        data: body,
+      ).timeout(timeout);
+      return resp;
+    } catch (e, st) {
+      _logger.error('LlmClient', '$method $endpoint failed: $e', st);
       rethrow;
     }
   }
 
-  /// 连通性测试：发送一次最小请求验证 Key / Base URL / 模型可用。
+  Future<Response<T>> _get<T>(
+    LlmConfig config,
+    String endpoint, {
+    Map<String, dynamic>? extraHeaders,
+    Duration timeout = const Duration(seconds: 15),
+  }) =>
+      _request<T>(
+        'GET',
+        config,
+        endpoint,
+        extraHeaders: extraHeaders,
+        timeout: timeout,
+      );
+
+  Future<Response<T>> _post<T>(
+    LlmConfig config,
+    String endpoint,
+    Map<String, dynamic> body, {
+    Map<String, dynamic>? extraHeaders,
+    Duration timeout = const Duration(seconds: 60),
+  }) =>
+      _request<T>(
+        'POST',
+        config,
+        endpoint,
+        body: body,
+        extraHeaders: extraHeaders,
+        timeout: timeout,
+      );
+
+  Future<List<String>> fetchModels({
+    required LlmConfig config,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final resp = await _get<dynamic>(config, 'models', timeout: timeout);
+    final data = resp.data;
+    if (data is Map<String, dynamic> && data['data'] is List) {
+      final ids = (data['data'] as List)
+          .whereType<Map>()
+          .map((m) => m['id']?.toString() ?? '')
+          .where((s) => s.isNotEmpty)
+          .toList();
+      ids.sort();
+      return ids;
+    }
+    return [];
+  }
+
   Future<void> testConnection({
     required LlmConfig config,
     Duration timeout = const Duration(seconds: 15),
   }) async {
-    final url = config.baseUrl.endsWith('/')
-        ? '${config.baseUrl}chat/completions'
-        : '${config.baseUrl}/chat/completions';
-
     final body = {
       'model': config.model,
       'max_tokens': 5,
@@ -74,95 +123,127 @@ class LlmClient {
         {'role': 'user', 'content': 'hi'},
       ],
     };
-
-    final originalHeaders = Map<String, dynamic>.from(dio.options.headers);
-    try {
-      dio.options.headers['Authorization'] = 'Bearer ${config.apiKey}';
-      dio.options.headers['Content-Type'] = 'application/json';
-      final resp = await dio.post<dynamic>(url, data: body).timeout(timeout);
-      dio.options.headers = originalHeaders;
-
-      final data = resp.data;
-      if (data is Map<String, dynamic> &&
-          data['choices'] is List &&
-          (data['choices'] as List).isNotEmpty) {
-        return;
-      }
-      throw DioException(
-        requestOptions: RequestOptions(path: url),
-        response: Response(
-          requestOptions: RequestOptions(path: url),
-          statusCode: resp.statusCode,
-        ),
-        type: DioExceptionType.badResponse,
-        message: '返回结构异常',
-      );
-    } on TimeoutException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } on DioException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } catch (e) {
-      dio.options.headers = originalHeaders;
-      rethrow;
+    final resp = await _post<dynamic>(
+      config,
+      'chat/completions',
+      body,
+      timeout: timeout,
+    );
+    final data = resp.data;
+    if (data is Map<String, dynamic> &&
+        data['choices'] is List &&
+        (data['choices'] as List).isNotEmpty) {
+      return;
     }
+    throw DioException(
+      requestOptions: RequestOptions(path: _buildUrl(config.baseUrl, 'chat/completions')),
+      response: Response(
+        requestOptions: RequestOptions(path: _buildUrl(config.baseUrl, 'chat/completions')),
+        statusCode: resp.statusCode,
+      ),
+      type: DioExceptionType.badResponse,
+      message: '返回结构异常',
+    );
   }
 
-  /// 多轮对话：messages 为 OpenAI 格式（role/content），
-  /// 返回助手回复文本。用于文章页「与 AI 对话」等场景。
   Future<String> chat({
     required LlmConfig config,
     required List<Map<String, String>> messages,
     Duration timeout = const Duration(seconds: 60),
   }) async {
-    final url = config.baseUrl.endsWith('/')
-        ? '${config.baseUrl}chat/completions'
-        : '${config.baseUrl}/chat/completions';
-
     final body = {
       'model': config.model,
       'messages': messages,
     };
+    final resp = await _post<dynamic>(
+      config,
+      'chat/completions',
+      body,
+      timeout: timeout,
+    );
+    final data = resp.data;
+    if (data is Map<String, dynamic> &&
+        data['choices'] is List &&
+        (data['choices'] as List).isNotEmpty) {
+      final msg = (data['choices'] as List)[0];
+      if (msg is Map && msg['message'] is Map) {
+        return (msg['message'] as Map)['content']?.toString() ?? '';
+      }
+    }
+    throw DioException(
+      requestOptions: RequestOptions(path: _buildUrl(config.baseUrl, 'chat/completions')),
+      type: DioExceptionType.badResponse,
+      message: '返回结构异常',
+    );
+  }
 
-    final originalHeaders = Map<String, dynamic>.from(dio.options.headers);
+  /// 流式对话，逐 token 返回（SSE）。保留 [chat] 不变以向后兼容。
+  Stream<String> chatStream({
+    required LlmConfig config,
+    required List<Map<String, String>> messages,
+    Duration timeout = const Duration(minutes: 5),
+  }) async* {
+    final url = _buildUrl(config.baseUrl, 'chat/completions');
+    final body = {
+      'model': config.model,
+      'messages': messages,
+      'stream': true,
+      'temperature': 0.7,
+    };
+
+    late final Response<ResponseBody> response;
     try {
-      dio.options.headers['Authorization'] = 'Bearer ${config.apiKey}';
-      dio.options.headers['Content-Type'] = 'application/json';
-      final resp = await dio.post<dynamic>(
+      response = await dio.post<ResponseBody>(
         url,
-        data: body,
+        data: jsonEncode(body),
         options: Options(
-          connectTimeout: const Duration(seconds: 10),
-          sendTimeout: timeout,
+          headers: {
+            'Authorization': 'Bearer ${config.apiKey}',
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+          },
+          responseType: ResponseType.stream,
           receiveTimeout: timeout,
         ),
-      ).timeout(timeout);
-      dio.options.headers = originalHeaders;
+      );
+    } catch (e, st) {
+      _logger.error('LlmClient', 'POST chat/completions stream failed: $e', st);
+      rethrow;
+    }
 
-      final data = resp.data;
-      if (data is Map<String, dynamic> &&
-          data['choices'] is List &&
-          (data['choices'] as List).isNotEmpty) {
-        final msg = (data['choices'] as List)[0];
-        if (msg is Map && msg['message'] is Map) {
-          return (msg['message'] as Map)['content']?.toString() ?? '';
+    final stream = response.data!.stream;
+    String buffer = '';
+
+    await for (final chunk in stream) {
+      buffer += utf8.decode(chunk, allowMalformed: true);
+      // 规范化行尾，兼容 \r\n / \r
+      buffer = buffer.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+      // SSE 事件以空行分隔
+      while (true) {
+        final idx = buffer.indexOf('\n\n');
+        if (idx < 0) break;
+        final event = buffer.substring(0, idx);
+        buffer = buffer.substring(idx + 2);
+
+        for (final line in event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          final data = line.substring(5).trim();
+          if (data.isEmpty) continue;
+          if (data == '[DONE]') return;
+
+          try {
+            final json = jsonDecode(data) as Map<String, dynamic>;
+            final delta =
+                json['choices']?[0]?['delta']?['content'] as String?;
+            if (delta != null && delta.isNotEmpty) {
+              yield delta;
+            }
+          } catch (_) {
+            // 跳过无法解析的行
+          }
         }
       }
-      throw DioException(
-        requestOptions: RequestOptions(path: url),
-        type: DioExceptionType.badResponse,
-        message: '返回结构异常',
-      );
-    } on TimeoutException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } on DioException {
-      dio.options.headers = originalHeaders;
-      rethrow;
-    } catch (e) {
-      dio.options.headers = originalHeaders;
-      rethrow;
     }
   }
 
@@ -171,13 +252,8 @@ class LlmClient {
     required String rawText,
     required String collectionType,
     String? systemPrompt,
-    // 长文 + 图片列表转录耗时长，默认给足 90 秒
     Duration timeout = const Duration(seconds: 90),
   }) async {
-    final url = config.baseUrl.endsWith('/')
-        ? '${config.baseUrl}chat/completions'
-        : '${config.baseUrl}/chat/completions';
-
     final system = (systemPrompt ?? _defaultSystemPrompt)
         .replaceAll(r'$collectionType', collectionType);
 
@@ -191,24 +267,13 @@ class LlmClient {
       ],
     };
 
-    final originalHeaders = Map<String, dynamic>.from(dio.options.headers);
-
     try {
-      dio.options.headers['Authorization'] = 'Bearer ${config.apiKey}';
-      dio.options.headers['Content-Type'] = 'application/json';
-
-      final resp = await dio.post(
-        url,
-        data: body,
-        // 覆盖全局 30s 接收超时，长文转录响应间隙可能超过 30s
-        options: Options(
-          connectTimeout: const Duration(seconds: 10),
-          sendTimeout: timeout,
-          receiveTimeout: timeout,
-        ),
-      ).timeout(timeout);
-
-      dio.options.headers = originalHeaders;
+      final resp = await _post<dynamic>(
+        config,
+        'chat/completions',
+        body,
+        timeout: timeout,
+      );
 
       if (resp.data == null ||
           resp.data['choices'] == null ||
@@ -220,8 +285,6 @@ class LlmClient {
 
       final message = resp.data['choices'][0]['message'] as Map<String, dynamic>;
       final content = (message['content'] ?? '').toString();
-      // 思考模型（deepseek-reasoner 等）把推理放 reasoning_content，
-      // 最终答案才在 content；content 为空时用思考链兜底解析
       final reasoning =
           (message['reasoning_content'] ?? message['reasoning'] ?? '').toString();
 
@@ -262,7 +325,6 @@ class LlmClient {
             .where((t) => t.trim().isNotEmpty)
             .take(10)
             .toList(growable: false),
-        // AI 建议的文件夹：保存层归一化（仅命中本地已有才用）
         category: (json['category'] as String? ?? '').trim(),
         aiReasoning: reasoning,
         aiRawOutput: content,
@@ -270,13 +332,11 @@ class LlmClient {
 
       return result;
     } on TimeoutException {
-      dio.options.headers = originalHeaders;
       throw TranscriptionException(
         TranscriptionFailureReason.timeout,
         'LLM 请求超时，内容可能过长，可重试或选择更精简的提示词',
       );
     } on DioException catch (e) {
-      dio.options.headers = originalHeaders;
       if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.receiveTimeout ||
           e.type == DioExceptionType.sendTimeout) {
@@ -294,10 +354,8 @@ class LlmClient {
       throw TranscriptionException(
           TranscriptionFailureReason.network, e.message ?? 'Dio error');
     } on TranscriptionException {
-      dio.options.headers = originalHeaders;
       rethrow;
     } catch (e) {
-      dio.options.headers = originalHeaders;
       throw TranscriptionException(
           TranscriptionFailureReason.parseError, e.toString());
     }

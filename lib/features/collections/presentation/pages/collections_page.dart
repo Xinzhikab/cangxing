@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/features/collections/data/models/category.dart';
 import 'package:fav_app/features/collections/data/models/collection.dart';
 import 'package:fav_app/features/collections/data/providers/category_tree_provider.dart';
@@ -12,7 +14,6 @@ import 'package:fav_app/features/collections/data/providers/collections_list_con
 import 'package:fav_app/features/collections/data/providers/collection_repository_provider.dart';
 import 'package:fav_app/features/settings/data/providers/list_field_style_provider.dart';
 
-/// 长按进入的批量选择模式
 final selectionModeProvider = StateProvider<bool>((ref) => false);
 final selectedIdsProvider = StateProvider<Set<String>>((ref) => {});
 
@@ -25,19 +26,20 @@ class CollectionsPage extends ConsumerStatefulWidget {
 
 class _CollectionsPageState extends ConsumerState<CollectionsPage> {
   late final TextEditingController _searchCtrl;
-  /// 搜索输入框是否展开。默认只显示「假搜索栏」，点按才展开真实
-  /// 输入框，避免抽屉关闭等场景焦点/点击穿透导致键盘意外弹出。
+  late final ScrollController _scrollCtrl;
   bool _searchOpen = false;
 
   @override
   void initState() {
     super.initState();
     _searchCtrl = TextEditingController();
+    _scrollCtrl = ScrollController();
   }
 
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
   }
 
@@ -47,10 +49,19 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
     return Scaffold(
       appBar: selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
       drawer: selectionMode ? null : const _CategoryDrawer(),
-      body: Column(
+      body: Stack(
         children: [
-          if (!selectionMode) const _FilterChipRow(),
-          Expanded(child: _ListBody()),
+          Column(
+            children: [
+              if (!selectionMode) const _FilterChipRow(),
+              Expanded(child: _ListBody(controller: _scrollCtrl)),
+            ],
+          ),
+          Positioned(
+            right: 16,
+            bottom: 100,
+            child: _buildScrollToTopBtn(),
+          ),
         ],
       ),
       floatingActionButton: selectionMode
@@ -63,45 +74,124 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
     );
   }
 
+  Widget _buildScrollToTopBtn() {
+    return AnimatedBuilder(
+      animation: _scrollCtrl,
+      builder: (ctx, _) {
+        final show = _scrollCtrl.hasClients && _scrollCtrl.offset > 400;
+        return AnimatedOpacity(
+          opacity: show ? 1 : 0,
+          duration: const Duration(milliseconds: 200),
+          child: IgnorePointer(
+            ignoring: !show,
+            child: FloatingActionButton.small(
+              heroTag: 'scroll_to_top',
+              onPressed: () => _scrollCtrl.animateTo(
+                0,
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOutCubic,
+              ),
+              child: const Icon(Icons.arrow_upward),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   AppBar _buildNormalAppBar() {
     final scheme = Theme.of(context).colorScheme;
     if (_searchOpen) {
-      // 展开态：真实输入框 + 关闭按钮；关闭时清空过滤并收起键盘
+      final history = ref.watch(searchHistoryProvider);
       return AppBar(
-        title: TextField(
-          controller: _searchCtrl,
-          autofocus: true,
-          textInputAction: TextInputAction.search,
-          decoration: InputDecoration(
-            hintText: '搜索标题或正文...',
-            prefixIcon: const Icon(Icons.search),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(24),
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _searchCtrl,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: '搜索标题或正文...',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                filled: true,
+                fillColor: scheme.surfaceContainerHighest,
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              ),
+              onChanged: (v) {
+                final f = ref
+                    .read(collectionsFilterProvider.notifier)
+                    .update((s) => s.copyWith(keyword: v));
+                ref.read(collectionsListProvider.notifier).setFilter(f);
+              },
+              onSubmitted: (v) {
+                ref.read(searchHistoryProvider.notifier).add(v);
+              },
             ),
-            filled: true,
-            fillColor: scheme.surfaceContainerHighest,
-          ),
-          onChanged: (v) => ref
-              .read(collectionsFilterProvider.notifier)
-              .update((s) => s.copyWith(keyword: v)),
+            if (history.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: SizedBox(
+                  height: 32,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: history.length,
+                    separatorBuilder: (_, i) => const SizedBox(width: 8),
+                    itemBuilder: (_, i) {
+                      return InputChip(
+                        label: Text(history[i]),
+                        onPressed: () {
+                          _searchCtrl.text = history[i];
+                          final f = ref
+                              .read(collectionsFilterProvider.notifier)
+                              .update((s) => s.copyWith(keyword: history[i]));
+                          ref
+                              .read(collectionsListProvider.notifier)
+                              .setFilter(f);
+                        },
+                        onDeleted: () =>
+                            ref.read(searchHistoryProvider.notifier).removeAt(i),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      );
+                    },
+                  ),
+                ),
+              ),
+          ],
         ),
         actions: [
+          if (history.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.history),
+              tooltip: '清除历史',
+              onPressed: () =>
+                  ref.read(searchHistoryProvider.notifier).clear(),
+            ),
           IconButton(
             icon: const Icon(Icons.close),
             tooltip: '关闭搜索',
             onPressed: () {
               FocusManager.instance.primaryFocus?.unfocus();
               _searchCtrl.clear();
-              ref
+              final f = ref
                   .read(collectionsFilterProvider.notifier)
                   .update((s) => s.copyWith(keyword: ''));
+              ref.read(collectionsListProvider.notifier).setFilter(f);
               setState(() => _searchOpen = false);
             },
           ),
         ],
+        bottom: history.isNotEmpty
+            ? const PreferredSize(
+                preferredSize: Size.fromHeight(0),
+                child: SizedBox.shrink(),
+              )
+            : null,
       );
     }
-    // 收起态：假搜索栏（纯展示，不持有焦点），点按才展开
     return AppBar(
       title: GestureDetector(
         onTap: () => setState(() => _searchOpen = true),
@@ -132,7 +222,6 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
         ),
       ),
       actions: [
-        // 卡片样式设置已移到「设置 → 主题与外观 → 首页卡片样式」
         IconButton(
           icon: const Icon(Icons.checklist),
           tooltip: '批量选择',
@@ -147,7 +236,6 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
     );
   }
 
-  /// 批量选择模式的 AppBar：计数 + 全选 + 批量移动/删除
   AppBar _buildSelectionAppBar() {
     final selected = ref.watch(selectedIdsProvider);
     final list = ref.watch(collectionsListProvider).valueOrNull ?? [];
@@ -176,6 +264,18 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
           },
         ),
         IconButton(
+          icon: const Icon(Icons.label_outline),
+          tooltip: '批量加标签',
+          onPressed:
+              selected.isEmpty ? null : () => _batchAddTags(selected.toList()),
+        ),
+        IconButton(
+          icon: const Icon(Icons.refresh_outlined),
+          tooltip: '批量改状态',
+          onPressed:
+              selected.isEmpty ? null : () => _batchUpdateStatus(selected.toList()),
+        ),
+        IconButton(
           icon: const Icon(Icons.drive_file_move_outline),
           tooltip: '移动到分类',
           onPressed: selected.isEmpty ? null : () => _batchMove(exitSelection),
@@ -184,6 +284,12 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
           icon: const Icon(Icons.delete_outline),
           tooltip: '删除',
           onPressed: selected.isEmpty ? null : () => _batchDelete(exitSelection),
+        ),
+        IconButton(
+          icon: const Icon(Icons.push_pin_outlined),
+          tooltip: '批量置顶',
+          onPressed:
+              selected.isEmpty ? null : () => _batchTogglePin(selected.toList()),
         ),
       ],
     );
@@ -195,7 +301,7 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('删除 ${ids.length} 篇收藏？'),
-        content: const Text('对应的正文与图片文件会一并删除，不可恢复。'),
+        content: const Text('会移到回收站（保留文件），可在【设置→回收站】恢复，或彻底删除。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -216,17 +322,152 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
     for (final id in ids) {
       try {
         await repo.delete(id);
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[CollectionsPage] $e\n$st');
+      }
     }
     ref.invalidate(collectionsListProvider);
     ref.invalidate(groupStatsProvider);
     ref.invalidate(allTagsProvider);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已删除 ${ids.length} 篇收藏')),
+        SnackBar(content: Text('已删除 ${ids.length} 篇收藏，可在回收站恢复')),
       );
     }
     onDone();
+  }
+
+  Future<void> _batchAddTags(List<String> ids) async {
+    final tagCtrl = TextEditingController();
+    final input = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('给 ${ids.length} 篇收藏加标签'),
+        content: TextField(
+          controller: tagCtrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '多个标签用逗号分隔',
+            hintText: '标签1, 标签2, 标签3',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, tagCtrl.text),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+    if (input == null) return;
+    final tags = input
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (tags.isEmpty) return;
+
+    if (ids.length > 20 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在给 ${ids.length} 篇收藏加标签...')),
+      );
+    }
+
+    final repo = ref.read(collectionRepositoryProvider);
+    var done = 0;
+    for (final id in ids) {
+      try {
+        final col = await repo.get(id);
+        if (col == null) continue;
+        final newTags = <String>{...col.tags, ...tags};
+        await repo.update(col.copyWith(tags: newTags.toList()));
+        done++;
+      } catch (e, st) {
+        debugPrint('[CollectionsPage] addTag: $e\n$st');
+      }
+    }
+    ref.invalidate(collectionsListProvider);
+    ref.invalidate(allTagsProvider);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已给 $done 篇收藏添加 ${tags.length} 个标签')),
+      );
+    }
+  }
+
+  Future<void> _batchUpdateStatus(List<String> ids) async {
+    CollectionStatus? picked = await showDialog<CollectionStatus>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('更新 ${ids.length} 篇状态为...'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, CollectionStatus.unread),
+            child: const Row(
+              children: [
+                Icon(Icons.mark_email_unread, color: Colors.grey),
+                SizedBox(width: 12),
+                Text('未读'),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, CollectionStatus.learning),
+            child: const Row(
+              children: [
+                Icon(Icons.school, color: Colors.orange),
+                SizedBox(width: 12),
+                Text('学习中 / 想学'),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, CollectionStatus.done),
+            child: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green),
+                SizedBox(width: 12),
+                Text('已完成'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    final targetStatus = CollectionEnums.statusToSql(picked)!;
+
+    if (ids.length > 20 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在更新 ${ids.length} 篇状态...')),
+      );
+    }
+
+    final repo = ref.read(collectionRepositoryProvider);
+    var done = 0;
+    for (final id in ids) {
+      try {
+        final col = await repo.get(id);
+        if (col == null) continue;
+        await repo.update(col.copyWith(status: targetStatus));
+        done++;
+      } catch (e, st) {
+        debugPrint('[CollectionsPage] updateStatus: $e\n$st');
+      }
+    }
+    ref.invalidate(collectionsListProvider);
+    ref.invalidate(groupStatsProvider);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                '已更新 $done 篇状态为「${CollectionEnums.statusLabel(picked)}」')),
+      );
+    }
   }
 
   Future<void> _batchMove(VoidCallback onDone) async {
@@ -234,7 +475,6 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
     final allCategories = ref.read(categoriesListProvider).valueOrNull ?? [];
     final byId = {for (final c in allCategories) c.id: c};
 
-    // 构建所有分类的完整路径
     final paths = <List<String>>[];
     for (final c in allCategories) {
       final temp = <String>[c.name];
@@ -296,7 +536,9 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
         if (col == null) continue;
         await repo.update(col.copyWith(category: picked));
         moved++;
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[CollectionsPage] $e\n$st');
+      }
     }
     ref.invalidate(collectionsListProvider);
     if (mounted) {
@@ -305,6 +547,46 @@ class _CollectionsPageState extends ConsumerState<CollectionsPage> {
       );
     }
     onDone();
+  }
+
+  Future<void> _batchTogglePin(List<String> ids) async {
+    final picked = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('批量置顶 ${ids.length} 篇'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Row(
+              children: [
+                Icon(Icons.push_pin, color: Colors.orange),
+                SizedBox(width: 12),
+                Text('全部置顶'),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Row(
+              children: [
+                Icon(Icons.push_pin_outlined),
+                SizedBox(width: 12),
+                Text('全部取消置顶'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+    final repo = ref.read(collectionRepositoryProvider);
+    await repo.setPinnedBatch(ids, pinned: picked);
+    ref.invalidate(collectionsListProvider);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(picked ? '已置顶 ${ids.length} 篇' : '已取消 ${ids.length} 篇置顶')),
+      );
+    }
   }
 }
 
@@ -362,9 +644,10 @@ class _CategoryDrawerState extends ConsumerState<_CategoryDrawer> {
       onTap: () {
         final path = _resolvePath(node, allCategories);
         ref.read(selectedCategoryPathProvider.notifier).state = path;
-        ref
+        final f = ref
             .read(collectionsFilterProvider.notifier)
             .update((s) => s.copyWith(categoryPath: path));
+        ref.read(collectionsListProvider.notifier).setFilter(f);
         Navigator.pop(context);
       },
       onLongPress: () {
@@ -409,9 +692,10 @@ class _CategoryDrawerState extends ConsumerState<_CategoryDrawer> {
                 title: const Text('全部收藏'),
                 onTap: () {
                   ref.read(selectedCategoryPathProvider.notifier).state = [];
-                  ref
+                  final f = ref
                       .read(collectionsFilterProvider.notifier)
                       .update((s) => s.copyWith(categoryPath: null));
+                  ref.read(collectionsListProvider.notifier).setFilter(f);
                   Navigator.pop(context);
                 },
               ),
@@ -494,8 +778,6 @@ class _FolderActionsSheet extends ConsumerWidget {
           ),
           onTap: () async {
             Navigator.pop(context);
-            // 等 bottom sheet 退出动画结束（Navigator 锁定期间
-            // push 进度弹窗会抛断言），再执行删除
             await Future.delayed(const Duration(milliseconds: 300));
             if (!context.mounted) return;
             BuildContext? dialogCtx;
@@ -740,14 +1022,15 @@ class _FilterChipRow extends StatelessWidget {
               ...groups.valueOrNull?['statuses']?.map((m) {
                     final k = m.keys.first;
                     final cnt = m.values.first;
+                    final statusEnum = CollectionEnums.statusFromSql(k);
                     return Padding(
                       padding: const EdgeInsets.only(left: 8),
                       child: FilterChip(
-                        label: Text('${_statusLabel(k)} $cnt'),
-                        selected: filter.status == k,
+                        label: Text('${_statusLabel(statusEnum)} $cnt'),
+                        selected: filter.status == statusEnum,
                         onSelected: (_) => _updFilter(
                           ref,
-                          filter.copyWith(status: k),
+                          filter.copyWith(status: statusEnum),
                         ),
                       ),
                     );
@@ -765,32 +1048,33 @@ class _FilterChipRow extends StatelessWidget {
               ...groups.valueOrNull?['platforms']?.take(4).map((m) {
                     final k = m.keys.first;
                     final cnt = m.values.first;
+                    final platformEnum = CollectionEnums.platformFromSql(k);
                     return Padding(
                       padding: const EdgeInsets.only(left: 8),
                       child: FilterChip(
-                        label: Text('${_platformLabel(k)} $cnt'),
-                        selected: filter.platform == k,
+                        label: Text('${_platformLabel(platformEnum)} $cnt'),
+                        selected: filter.platform == platformEnum,
                         onSelected: (_) => _updFilter(
                           ref,
-                          filter.copyWith(platform: k),
+                          filter.copyWith(platform: platformEnum),
                         ),
                       ),
                     );
                   }).toList(growable: false) ??
                   [],
               const SizedBox(width: 12),
-              PopupMenuButton<String>(
+              PopupMenuButton<CollectionSortField>(
                 itemBuilder: (_) => [
                   const PopupMenuItem(
-                    value: 'collected_at',
+                    value: CollectionSortField.collectedAt,
                     child: Text('按收藏时间'),
                   ),
                   const PopupMenuItem(
-                    value: 'published_at',
+                    value: CollectionSortField.publishedAt,
                     child: Text('按原帖时间'),
                   ),
                   const PopupMenuItem(
-                    value: 'title',
+                    value: CollectionSortField.title,
                     child: Text('按标题'),
                   ),
                 ],
@@ -815,6 +1099,32 @@ class _FilterChipRow extends StatelessWidget {
                   filter.copyWith(descending: !filter.descending),
                 ),
               ),
+              const SizedBox(width: 8),
+              Builder(
+                builder: (context) {
+                  final scheme = Theme.of(context).colorScheme;
+                  return FilterChip(
+                    label: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.push_pin,
+                          size: 14,
+                          color: filter.pinnedOnly
+                              ? scheme.onPrimaryContainer
+                              : null,
+                        ),
+                        const SizedBox(width: 4),
+                        const Text('置顶'),
+                      ],
+                    ),
+                    selected: filter.pinnedOnly,
+                    onSelected: (v) {
+                      _updFilter(ref, filter.copyWith(pinnedOnly: v));
+                    },
+                  );
+                },
+              ),
             ],
           );
         },
@@ -823,23 +1133,25 @@ class _FilterChipRow extends StatelessWidget {
   }
 }
 
-void _updFilter(WidgetRef ref, CollectionsFilter f) =>
-    ref.read(collectionsFilterProvider.notifier).state = f;
+void _updFilter(WidgetRef ref, CollectionsFilter f) {
+  ref.read(collectionsFilterProvider.notifier).state = f;
+  ref.read(collectionsListProvider.notifier).setFilter(f);
+}
 
-String _statusLabel(String k) =>
-    {'learning': '想学', 'done': '已完成'}[k] ?? k;
+String _statusLabel(CollectionStatus? s) =>
+    CollectionEnums.statusLabel(s);
 
-String _platformLabel(String k) =>
-    {'douyin': '抖音', 'xiaoheihe': '小黑盒', 'coolapk': '酷安', 'other': '其他'}[
-        k] ??
-    k;
+String _platformLabel(SourcePlatform? p) =>
+    CollectionEnums.platformLabel(p);
 
-String _sortLabel(String k) =>
-    {'collected_at': '收藏时间', 'published_at': '原帖时间', 'title': '标题'}[
-        k] ??
-    k;
+String _sortLabel(CollectionSortField s) =>
+    CollectionEnums.sortLabel(s);
 
 class _ListBody extends StatelessWidget {
+  final ScrollController? controller;
+
+  const _ListBody({this.controller});
+
   @override
   Widget build(BuildContext context) {
     return Consumer(
@@ -856,6 +1168,7 @@ class _ListBody extends StatelessWidget {
               },
               child: list.isEmpty
                   ? ListView(
+                      controller: controller,
                       physics: const AlwaysScrollableScrollPhysics(),
                       children: [
                         SizedBox(
@@ -878,6 +1191,7 @@ class _ListBody extends StatelessWidget {
                       ],
                     )
                   : ListView.separated(
+                      controller: controller,
                       physics: const AlwaysScrollableScrollPhysics(),
                       itemCount: list.length,
                       separatorBuilder: (_, __) => const Divider(height: 1),
@@ -905,8 +1219,8 @@ class _CollectionTile extends StatelessWidget {
       builder: (_, ref, __) {
         final selectionMode = ref.watch(selectionModeProvider);
         final selected = ref.watch(selectedIdsProvider).contains(c.id);
-        // 栏目显示配置：图标/平台/作者/时间可自定义组合
         final fieldStyle = ref.watch(listFieldStyleProvider);
+        final scheme = Theme.of(context).colorScheme;
 
         void toggleSelect() {
           final ids = Set<String>.from(ref.read(selectedIdsProvider));
@@ -914,9 +1228,9 @@ class _CollectionTile extends StatelessWidget {
           ref.read(selectedIdsProvider.notifier).state = ids;
         }
 
-        // 副标题按开关拼接：平台 · 作者 · 时间 · 分类
         final subtitleParts = <String>[
-          if (fieldStyle.showPlatform) _platformLabel(c.sourcePlatform),
+          if (fieldStyle.showPlatform)
+            _platformLabel(CollectionEnums.platformFromSql(c.sourcePlatform)),
           if (fieldStyle.showAuthor)
             c.author.isEmpty ? '佚名' : c.author,
           if (fieldStyle.showTime)
@@ -926,7 +1240,6 @@ class _CollectionTile extends StatelessWidget {
         ];
         final hasSubtitle = subtitleParts.isNotEmpty;
 
-        // 正文摘要：Markdown 里第一段非空纯文本，截 80 字
         final snippet = fieldStyle.showSnippet
             ? _extractSnippet(c.contentMd)
             : '';
@@ -944,23 +1257,41 @@ class _CollectionTile extends StatelessWidget {
             backgroundColor: selected
                 ? Theme.of(context).colorScheme.primaryContainer
                 : null,
-            child: Text(_platformLabel(c.sourcePlatform)[0]),
+            child: Text(_platformLabel(
+                    CollectionEnums.platformFromSql(c.sourcePlatform))[0]),
           );
         }
 
+        final statusEnum = CollectionEnums.statusFromSql(c.status);
         final showBadge = !selectionMode &&
             fieldStyle.showStatusBadge &&
-            (c.status == 'learning' || c.status == 'done');
+            (statusEnum == CollectionStatus.learning ||
+                statusEnum == CollectionStatus.done);
 
-        // 标题 + 摘要 + 标签都在 title 区纵向排布
-        final titleBlock = Column(
+        final titleBlockContent = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              c.title,
-              maxLines: fieldStyle.titleLines,
-              overflow: TextOverflow.ellipsis,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (c.pinnedAt != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, right: 4),
+                    child: Icon(
+                      Icons.push_pin,
+                      size: 14,
+                      color: scheme.primary,
+                    ),
+                  ),
+                Expanded(
+                  child: Text(
+                    c.title,
+                    maxLines: fieldStyle.titleLines,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
             ),
             if (snippet.isNotEmpty) ...[
               const SizedBox(height: 2),
@@ -1006,13 +1337,50 @@ class _CollectionTile extends StatelessWidget {
           ],
         );
 
-        return ListTile(
-          onTap: selectionMode ? toggleSelect : () => context.push('/read/${c.id}'),
-          // 长按进入批量选择模式（单项编辑/删除入口在详情页）
-          onLongPress: () {
-            ref.read(selectionModeProvider.notifier).state = true;
-            ref.read(selectedIdsProvider.notifier).state = {c.id};
-          },
+        Widget? trailing;
+        if (!selectionMode) {
+          trailing = PopupMenuButton<_TileAction>(
+            onSelected: (action) async {
+              final repo = ref.read(collectionRepositoryProvider);
+              switch (action) {
+                case _TileAction.togglePin:
+                  await repo.togglePin(c.id);
+                  ref.invalidate(collectionsListProvider);
+                  break;
+              }
+            },
+            itemBuilder: (ctx) => [
+              PopupMenuItem<_TileAction>(
+                value: _TileAction.togglePin,
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(c.pinnedAt != null
+                      ? Icons.push_pin_outlined
+                      : Icons.push_pin),
+                  title: Text(c.pinnedAt != null ? '取消置顶' : '置顶'),
+                ),
+              ),
+            ],
+            child: showBadge
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: _statusColor(statusEnum, context),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      _statusLabel(statusEnum),
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
+                  )
+                : const Icon(Icons.more_vert),
+          );
+        }
+
+        final tile = ListTile(
           leading: leading,
           selected: selectionMode && selected,
           dense: fieldStyle.compact,
@@ -1022,7 +1390,7 @@ class _CollectionTile extends StatelessWidget {
           contentPadding: fieldStyle.compact
               ? const EdgeInsets.symmetric(horizontal: 12, vertical: 2)
               : null,
-          title: titleBlock,
+          title: titleBlockContent,
           subtitle: hasSubtitle
               ? Text(
                   subtitleParts.join(' · '),
@@ -1030,49 +1398,50 @@ class _CollectionTile extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 )
               : null,
-          // 已读/未读功能已移除：仅「想学 / 已完成」显示状态徽标
-          trailing: selectionMode
-              ? null
-              : showBadge
-                  ? Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: _statusColor(c.status, context),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        _statusLabel(c.status),
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 12),
-                      ),
-                    )
-                  : const Icon(Icons.chevron_right),
+          trailing: trailing,
+        );
+
+        return GestureDetector(
+          onLongPress: () {
+            if (!ref.read(selectionModeProvider)) {
+              ref.read(selectionModeProvider.notifier).state = true;
+              ref.read(selectedIdsProvider.notifier).state = {c.id};
+              HapticFeedback.mediumImpact();
+            }
+          },
+          onTap: () {
+            final selMode = ref.read(selectionModeProvider);
+            if (selMode) {
+              toggleSelect();
+            } else {
+              context.push('/read/${c.id}');
+            }
+          },
+          child: tile,
         );
       },
     );
   }
 }
 
-/// 从 Markdown 正文提取摘要：第一段非空纯文本，
-/// 去掉常见 Markdown 标记（标题符/图片/链接/加粗），截 80 字。
+enum _TileAction { togglePin }
+
 String _extractSnippet(String contentMd) {
   if (contentMd.isEmpty) return '';
   for (var line in contentMd.split('\n')) {
     line = line.trim();
     if (line.isEmpty) continue;
-    // 跳过图片与链接行
     if (line.startsWith('![') || RegExp(r'^\[[^\]]*\]\(').hasMatch(line)) {
       continue;
     }
     var text = line
-        .replaceFirst(RegExp(r'^#{1,6}\s*'), '') // 标题符
-        .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '') // 行内图片
-        .replaceAll(RegExp(r'\[([^\]]*)\]\([^)]*\)'), r'$1') // 链接取文字
+        .replaceFirst(RegExp(r'^#{1,6}\s*'), '')
+        .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '')
+        .replaceAll(RegExp(r'\[([^\]]*)\]\([^)]*\)'), r'$1')
         .replaceAll('*', '')
         .replaceAll('_', '')
         .replaceAll('`', '')
-        .replaceAll(RegExp(r'^>\s?'), ''); // 引用符
+        .replaceAll(RegExp(r'^>\s?'), '');
     text = text.trim();
     if (text.isEmpty) continue;
     return text.length > 80 ? '${text.substring(0, 80)}…' : text;
@@ -1080,13 +1449,5 @@ String _extractSnippet(String contentMd) {
   return '';
 }
 
-Color _statusColor(String s, BuildContext context) {
-  switch (s) {
-    case 'learning':
-      return Colors.orange;
-    case 'done':
-      return Colors.green;
-    default:
-      return Colors.grey;
-  }
-}
+Color _statusColor(CollectionStatus? s, BuildContext context) =>
+    CollectionEnums.statusColor(s);

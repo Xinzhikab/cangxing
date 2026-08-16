@@ -1,4 +1,4 @@
-package com.example.fav_app
+package cn.cangxing.mobile
 
 import io.flutter.embedding.android.FlutterActivity
 

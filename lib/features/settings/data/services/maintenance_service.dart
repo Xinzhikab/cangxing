@@ -1,19 +1,32 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import 'package:fav_app/core/utils/storage_path_provider.dart';
 import 'package:fav_app/features/collections/data/services/database_service.dart';
+import 'package:fav_app/features/save/data/providers/transcription_providers.dart';
 
 class MaintenanceService {
+  final StoragePathProvider _storage;
+  final DatabaseService _db;
+
+  MaintenanceService(this._storage, this._db);
+
   /// 重建 FTS 全文索引：清空 collections_fts 后从每篇收藏的
   /// meta + content 文件重新灌入。索引损坏/搜索结果异常时使用。
+  /// 仅重建未软删除的收藏，软删除项保持无 FTS 行（搜索不可见）。
   Future<int> rebuildSearchIndex() async {
-    final db = await DatabaseService.instance.database;
-    final storageRoot = await StoragePathProvider().getRootDir();
+    final db = await _db.database;
+    final storageRoot = await _storage.getRootDir();
 
-    final ids = (await db.query('collections', columns: ['id']))
+    final ids = (await db.query(
+      'collections',
+      columns: ['id'],
+      where: 'deleted_at IS NULL',
+    ))
         .map((row) => row['id'] as String)
         .toList();
 
@@ -27,18 +40,13 @@ class MaintenanceService {
       String? title;
       String? note;
       if (await metaFile.exists()) {
-        // 标题/笔记存在 meta JSON 里，读不到就退化用占位
         try {
           final lines = await metaFile.readAsString();
-          title = RegExp(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"')
-                  .firstMatch(lines)
-                  ?.group(1) ??
-              '';
-          note = RegExp(r'"note"\s*:\s*"((?:[^"\\]|\\.)*)"')
-                  .firstMatch(lines)
-                  ?.group(1) ??
-              '';
-        } catch (_) {
+          final Map<String, dynamic> m = jsonDecode(lines);
+          title = m['title'] as String? ?? '';
+          note = m['note'] as String? ?? '';
+        } catch (e, st) {
+          debugPrint('[Maintenance] $e\n$st');
           title = '';
           note = '';
         }
@@ -47,7 +55,9 @@ class MaintenanceService {
       if (await contentFile.exists()) {
         try {
           content = await contentFile.readAsString();
-        } catch (_) {}
+        } catch (e, st) {
+          debugPrint('[Maintenance] $e\n$st');
+        }
       }
       batch.rawInsert(
         'INSERT INTO collections_fts(rowid, title, note, content_text) '
@@ -63,8 +73,8 @@ class MaintenanceService {
   /// 清理孤儿图片：images/{id}/ 目录在数据库已无对应收藏时整目录删除。
   /// 返回删除的目录数与释放的字节数。
   Future<(int dirs, int bytes)> cleanOrphanImages() async {
-    final db = await DatabaseService.instance.database;
-    final storageRoot = await StoragePathProvider().getRootDir();
+    final db = await _db.database;
+    final storageRoot = await _storage.getRootDir();
 
     final ids = (await db.query('collections', columns: ['id']))
         .map((row) => row['id'] as String)
@@ -84,18 +94,29 @@ class MaintenanceService {
         if (f is File) {
           try {
             bytes += await f.length();
-          } catch (_) {}
+          } catch (e, st) {
+            debugPrint('[Maintenance] $e\n$st');
+          }
         }
       }
       try {
         await entity.delete(recursive: true);
         dirs++;
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[Maintenance] $e\n$st');
+      }
     }
     return (dirs, bytes);
   }
 }
 
-final maintenanceServiceProvider = Provider<MaintenanceService>(
-  (_) => MaintenanceService(),
-);
+final databaseServiceProvider = Provider<DatabaseService>((ref) {
+  return DatabaseService.instance;
+});
+
+final maintenanceServiceProvider = Provider<MaintenanceService>((ref) {
+  return MaintenanceService(
+    ref.read(storagePathProvider),
+    ref.read(databaseServiceProvider),
+  );
+});

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -17,8 +19,9 @@ class ArticleChatPage extends ConsumerStatefulWidget {
 
 class _ChatMessage {
   final bool isUser;
+  final bool isSystem;
   final String text;
-  _ChatMessage(this.isUser, this.text);
+  _ChatMessage(this.isUser, this.text, {this.isSystem = false});
 }
 
 class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
@@ -28,6 +31,10 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
   bool _sending = false;
   bool _loaded = false;
   String _articleText = '';
+  bool _showTruncateBanner = false;
+  int _truncatedChars = 0;
+  StreamSubscription<String>? _streamSub;
+  int? _streamingIdx;
 
   @override
   void initState() {
@@ -37,6 +44,7 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
 
   @override
   void dispose() {
+    _streamSub?.cancel();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -50,10 +58,11 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
       return;
     }
     var text = col.contentMd.trim();
-    // 截断超长正文：保留开头部分作上下文
     const maxChars = 12000;
     if (text.length > maxChars) {
-      text = '${text.substring(0, maxChars)}\n\n……（原文过长已截断）';
+      _truncatedChars = text.length - maxChars;
+      _showTruncateBanner = true;
+      text = text.substring(0, maxChars);
     }
     setState(() {
       _articleText = text;
@@ -87,34 +96,102 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
 
     setState(() {
       _sending = true;
+      if (_showTruncateBanner && !_messages.any((m) => m.isSystem)) {
+        const maxChars = 12000;
+        _messages.insert(0, _ChatMessage(
+          false,
+          '⚠️ 正文过长（${maxChars + _truncatedChars} 字），为节省 token 已截取前 $maxChars 字。'
+          '如需完整上下文可切换到【摘要模式】（即将上线）。',
+          isSystem: true,
+        ));
+      }
       _messages.add(_ChatMessage(true, question));
       _inputCtrl.clear();
     });
-    _scrollToBottom();
 
-    try {
-      // 构造多轮消息：system 带全文 + 历史对话
-      final history = <Map<String, String>>[
-        {
-          'role': 'system',
-          'content': '你是一个阅读助手。以下是用户收藏的一篇文章，'
-              '请基于文章内容回答用户的问题；文章中没有的信息请如实说明，'
-              '不要编造。回答使用中文。\n\n=== 文章正文 ===\n$_articleText',
-        },
-        for (final m in _messages)
+    // 构建对话历史（此时 _messages 还未包含 assistant 占位消息）
+    final history = <Map<String, String>>[
+      {
+        'role': 'system',
+        'content': '你是一个阅读助手。以下是用户收藏的一篇文章，'
+            '请基于文章内容回答用户的问题；文章中没有的信息请如实说明，'
+            '不要编造。回答使用中文。\n\n=== 文章正文 ===\n$_articleText',
+      },
+      for (final m in _messages)
+        if (m.isSystem)
+          {'role': 'system', 'content': m.text}
+        else
           {'role': m.isUser ? 'user' : 'assistant', 'content': m.text},
-      ];
-      final reply = await ref.read(llmClientProvider).chat(
-            config: config,
-            messages: history,
-          );
-      setState(() => _messages.add(_ChatMessage(false, reply)));
+    ];
+
+    // 先添加一条空的 assistant 消息，随流逐步更新
+    setState(() {
+      _messages.add(_ChatMessage(false, ''));
+      _streamingIdx = _messages.length - 1;
+    });
+    _scrollToBottom();
+    final assistantIdx = _streamingIdx!;
+
+    final client = ref.read(llmClientProvider);
+    String fullReply = '';
+    try {
+      _streamSub = client
+          .chatStream(config: config, messages: history)
+          .listen(
+        (token) {
+          fullReply += token;
+          if (!mounted) return;
+          setState(() {
+            _messages[assistantIdx] = _ChatMessage(false, fullReply);
+          });
+          _scrollToBottom();
+        },
+        onDone: () {
+          _streamSub = null;
+          if (!mounted) return;
+          if (fullReply.isEmpty) {
+            setState(() {
+              _messages[assistantIdx] = _ChatMessage(false, '（回复为空）');
+            });
+          }
+          setState(() {
+            _sending = false;
+            _streamingIdx = null;
+          });
+        },
+        onError: (e) {
+          _streamSub = null;
+          if (!mounted) return;
+          setState(() {
+            // 流中断时保留已收到的部分回复；若一点没收到则提示错误
+            if (fullReply.isEmpty) {
+              _messages[assistantIdx] = _ChatMessage(false, '请求失败：$e');
+            }
+            _sending = false;
+            _streamingIdx = null;
+          });
+        },
+      );
     } catch (e) {
-      setState(() => _messages.add(_ChatMessage(false, '请求失败：$e')));
-    } finally {
-      setState(() => _sending = false);
-      _scrollToBottom();
+      if (!mounted) return;
+      setState(() {
+        if (fullReply.isEmpty) {
+          _messages[assistantIdx] = _ChatMessage(false, '请求失败：$e');
+        }
+        _sending = false;
+        _streamingIdx = null;
+      });
     }
+  }
+
+  /// 取消正在进行的流式回复，保留已收到的部分内容。
+  void _stopStreaming() {
+    _streamSub?.cancel();
+    _streamSub = null;
+    setState(() {
+      _sending = false;
+      _streamingIdx = null;
+    });
   }
 
   @override
@@ -128,6 +205,34 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
               ? const Center(child: Text('该收藏没有正文，无法对话'))
               : Column(
                   children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      height: _showTruncateBanner ? 36 : 0,
+                      color: scheme.tertiaryContainer,
+                      child: _showTruncateBanner
+                          ? Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.info_outline, size: 16, color: scheme.onTertiaryContainer),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '已截断 $_truncatedChars 字，仅使用前 12000 字作为上下文',
+                                    style: TextStyle(fontSize: 12, color: scheme.onTertiaryContainer),
+                                  ),
+                                  const Spacer(),
+                                  IconButton(
+                                    icon: Icon(Icons.close, size: 16, color: scheme.onTertiaryContainer),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () => setState(() => _showTruncateBanner = false),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : null,
+                    ),
                     Expanded(
                       child: _messages.isEmpty
                           ? Center(
@@ -149,19 +254,29 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
                           : ListView.builder(
                               controller: _scrollCtrl,
                               padding: const EdgeInsets.all(12),
-                              itemCount: _messages.length + (_sending ? 1 : 0),
+                              itemCount: _messages.length,
                               itemBuilder: (_, i) {
-                                if (i == _messages.length) {
-                                  return const Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Padding(
-                                      padding: EdgeInsets.all(12),
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2),
+                                final m = _messages[i];
+                                if (m.isSystem) {
+                                  return Container(
+                                    margin: const EdgeInsets.symmetric(vertical: 6),
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: scheme.tertiaryContainer.withValues(alpha: 0.5),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+                                    ),
+                                    child: Text(
+                                      m.text,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: scheme.onTertiaryContainer,
+                                        height: 1.4,
+                                      ),
                                     ),
                                   );
                                 }
-                                final m = _messages[i];
+                                final streaming = _sending && i == _streamingIdx;
                                 return Align(
                                   alignment: m.isUser
                                       ? Alignment.centerRight
@@ -183,7 +298,7 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
                                       borderRadius: BorderRadius.circular(16),
                                     ),
                                     child: Text(
-                                      m.text,
+                                      streaming ? '${m.text}▋' : m.text,
                                       style: TextStyle(
                                         color: m.isUser
                                             ? scheme.onPrimary
@@ -215,8 +330,8 @@ class _ArticleChatPageState extends ConsumerState<ArticleChatPage> {
                             ),
                             const SizedBox(width: 8),
                             IconButton.filled(
-                              icon: const Icon(Icons.send),
-                              onPressed: _sending ? null : _send,
+                              icon: Icon(_sending ? Icons.stop : Icons.send),
+                              onPressed: _sending ? _stopStreaming : _send,
                             ),
                           ],
                         ),

@@ -48,7 +48,7 @@ class MetaEditDialog extends ConsumerStatefulWidget {
 }
 
 class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
-  static const Map<String, String> _platformOptions = {
+  static const Map<SourcePlatform, String> _platformOptions = {
     SourcePlatform.xiaoheihe: '小黑盒',
     SourcePlatform.douyin: '抖音',
     SourcePlatform.coolapk: '酷安',
@@ -58,7 +58,7 @@ class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
   late final TextEditingController _titleCtrl;
   late final TextEditingController _authorCtrl;
   late final TextEditingController _tagCtrl;
-  late String _platform;
+  late SourcePlatform _platform;
   DateTime? _publishedAt;
   late final List<String> _tags;
 
@@ -68,8 +68,9 @@ class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
     _titleCtrl = TextEditingController(text: widget.initialTitle);
     _authorCtrl = TextEditingController(text: widget.initialAuthor);
     _tagCtrl = TextEditingController();
-    _platform = _platformOptions.containsKey(widget.initialPlatform)
-        ? widget.initialPlatform
+    final initialEnum = CollectionEnums.platformFromSql(widget.initialPlatform);
+    _platform = _platformOptions.containsKey(initialEnum)
+        ? initialEnum!
         : SourcePlatform.other;
     _publishedAt = widget.initialPublishedAt;
     _tags = List.of(widget.initialTags);
@@ -133,8 +134,8 @@ class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
               ),
             ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _platform,
+            DropdownButtonFormField<SourcePlatform>(
+              value: _platform,
               decoration: const InputDecoration(
                 labelText: '平台',
                 border: OutlineInputBorder(),
@@ -186,80 +187,89 @@ class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
               ),
               const SizedBox(height: 8),
             ],
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _tagCtrl,
-                    decoration: const InputDecoration(
-                      hintText: '添加标签（可从下方已有标签点选）',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onSubmitted: (_) => _addTag(),
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '添加标签',
-                  icon: const Icon(Icons.add),
-                  onPressed: _addTag,
-                ),
-              ],
-            ),
-            // 已有标签点选：标签注册表 + 全部收藏标签聚合；
-            // 输入框有内容时按前缀/包含过滤，已添加的不再展示
-            ref.watch(allTagsProvider).maybeWhen(
-                  data: (counts) {
-                    final query = _tagCtrl.text.trim().toLowerCase();
-                    final candidates = counts.keys
-                        .where((t) => !_tags.contains(t))
-                        .where((t) =>
-                            query.isEmpty || t.toLowerCase().contains(query))
-                        .toList()
-                      ..sort((a, b) {
-                        // 输入过滤时前缀命中优先，其次按使用次数降序
-                        final ap = a.toLowerCase().startsWith(query) ? 0 : 1;
-                        final bp = b.toLowerCase().startsWith(query) ? 0 : 1;
-                        if (ap != bp) return ap - bp;
-                        return (counts[b] ?? 0).compareTo(counts[a] ?? 0);
-                      });
-                    if (candidates.isEmpty) return const SizedBox.shrink();
-                    return Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '已有标签（点击添加）',
-                            style: Theme.of(context).textTheme.bodySmall,
+            ListenableBuilder(
+              listenable: _tagCtrl,
+              builder: (context, _) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _tagCtrl,
+                            decoration: const InputDecoration(
+                              hintText: '添加标签（可从下方已有标签点选）',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            onSubmitted: (_) => _addTag(),
                           ),
-                          const SizedBox(height: 4),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 120),
-                            child: SingleChildScrollView(
-                              child: Wrap(
-                                spacing: 6,
-                                runSpacing: 6,
+                        ),
+                        IconButton(
+                          tooltip: '添加标签',
+                          icon: const Icon(Icons.add),
+                          onPressed: _addTag,
+                        ),
+                      ],
+                    ),
+                    // 已有标签点选：标签注册表 + 全部收藏标签聚合；
+                    // 输入框有内容时按前缀/包含过滤，已添加的不再展示
+                    ref.watch(allTagsProvider).maybeWhen(
+                          data: (counts) {
+                            final query = _tagCtrl.text.trim().toLowerCase();
+                            final candidates = counts.keys
+                                .where((t) => !_tags.contains(t))
+                                .where((t) =>
+                                    query.isEmpty || t.toLowerCase().contains(query))
+                                .toList()
+                              ..sort((a, b) {
+                                // 输入过滤时前缀命中优先，其次按使用次数降序
+                                final ap = a.toLowerCase().startsWith(query) ? 0 : 1;
+                                final bp = b.toLowerCase().startsWith(query) ? 0 : 1;
+                                if (ap != bp) return ap - bp;
+                                return (counts[b] ?? 0).compareTo(counts[a] ?? 0);
+                              });
+                            if (candidates.isEmpty) return const SizedBox.shrink();
+                            return Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  for (final t in candidates)
-                                    ActionChip(
-                                      label: Text(
-                                        counts[t]! > 0 ? '$t (${counts[t]})' : t,
+                                  Text(
+                                    '已有标签（点击添加）',
+                                    style: Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                  const SizedBox(height: 4),
+                                  ConstrainedBox(
+                                    constraints: const BoxConstraints(maxHeight: 120),
+                                    child: SingleChildScrollView(
+                                      child: Wrap(
+                                        spacing: 6,
+                                        runSpacing: 6,
+                                        children: [
+                                          for (final t in candidates)
+                                            ActionChip(
+                                              label: Text(
+                                                counts[t]! > 0 ? '$t (${counts[t]})' : t,
+                                              ),
+                                              onPressed: () =>
+                                                  setState(() => _tags.add(t)),
+                                            ),
+                                        ],
                                       ),
-                                      onPressed: () =>
-                                          setState(() => _tags.add(t)),
                                     ),
+                                  ),
                                 ],
                               ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                  orElse: () => const SizedBox.shrink(),
-                ),
+                            );
+                          },
+                          orElse: () => const SizedBox.shrink(),
+                        ),
+                  ],
+                );
+              },
+            ),
           ],
         ),
       ),
@@ -275,7 +285,7 @@ class _MetaEditDialogState extends ConsumerState<MetaEditDialog> {
               MetaEditResult(
                 title: _titleCtrl.text,
                 author: _authorCtrl.text,
-                platform: _platform,
+                platform: CollectionEnums.platformToSql(_platform)!,
                 publishedAt: _publishedAt,
                 clearDate:
                     widget.initialPublishedAt != null && _publishedAt == null,

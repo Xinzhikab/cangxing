@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fav_app/core/utils/storage_path_provider.dart';
+import 'package:fav_app/features/collections/data/providers/collections_refresh_provider.dart';
 import 'package:fav_app/features/collections/data/services/database_service.dart';
 import 'package:fav_app/features/collections/data/services/file_storage_service.dart';
 import 'package:fav_app/features/collections/data/repositories/category_repository.dart';
@@ -12,5 +13,6 @@ final categoryRepositoryProvider = Provider<CategoryRepository>((ref) {
     db: DatabaseService.instance,
     collectionRepo: collectionRepo,
     fileStorage: FileStorageService(StoragePathProvider()),
+    onChanged: () => ref.read(collectionsRefreshProvider.notifier).bump(),
   );
 });

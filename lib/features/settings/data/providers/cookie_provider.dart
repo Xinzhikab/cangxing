@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SiteCookie {
@@ -23,60 +24,84 @@ class SiteCookie {
   }
 }
 
-class CookieNotifier extends Notifier<List<SiteCookie>> {
-  static const String _kKey = 'cookiejar_entries';
-  Future<void>? _pendingLoad;
+class CookieNotifier extends AsyncNotifier<List<SiteCookie>> {
+  static const String _kLegacyKey = 'cookiejar_entries';
+  static const String _kSecKey = 'sec_cookiejar_entries';
+  static FlutterSecureStorage? _secureCache;
+  FlutterSecureStorage get _secure => _secureCache ??= const FlutterSecureStorage();
 
   @override
-  List<SiteCookie> build() {
-    _pendingLoad ??= _load();
-    return [];
-  }
+  Future<List<SiteCookie>> build() async {
+    final prefs = await SharedPreferences.getInstance();
+    final legacy = prefs.getString(_kLegacyKey);
+    if (legacy != null && legacy.isNotEmpty) {
+      await _secure.write(key: _kSecKey, value: legacy);
+      await prefs.remove(_kLegacyKey);
+    }
 
-  Future<void> _load() async {
-    final p = await SharedPreferences.getInstance();
-    final s = p.getString(_kKey);
-    if (s == null) return;
+    final s = await _secure.read(key: _kSecKey);
+    if (s == null || s.isEmpty) return const [];
     final List list = jsonDecode(s);
-    state = list
+    return list
         .map((e) => SiteCookie(domain: e['d'], cookie: e['c']))
         .toList(growable: false);
   }
 
   Future<void> _persist() async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(
-      _kKey,
-      jsonEncode(state.map((c) => {'d': c.domain, 'c': c.cookie}).toList()),
+    final data = state.valueOrNull ?? const [];
+    await _secure.write(
+      key: _kSecKey,
+      value: jsonEncode(data.map((c) => {'d': c.domain, 'c': c.cookie}).toList()),
     );
   }
 
   Future<void> upsert(SiteCookie old, SiteCookie next) async {
-    // 等待初次加载完成，避免在空状态上写入后被异步加载结果覆盖
-    await _pendingLoad;
-    final exists = state.any((c) => c == old || c.domain == old.domain);
+    final current = state.valueOrNull ?? const [];
+    final exists = current.any((c) => c == old || c.domain == old.domain);
+    final List<SiteCookie> updated;
     if (!exists) {
-      state = [...state, next];
+      updated = [...current, next];
     } else {
-      state = state
+      updated = current
           .map((c) => c == old || c.domain == old.domain ? next : c)
           .toList(growable: false);
     }
+    state = AsyncValue.data(updated);
     await _persist();
   }
 
   Future<void> remove(String domain) async {
-    await _pendingLoad;
-    state = state.where((c) => c.domain != domain).toList(growable: false);
+    final current = state.valueOrNull ?? const [];
+    final updated = current.where((c) => c.domain != domain).toList(growable: false);
+    state = AsyncValue.data(updated);
     await _persist();
+  }
+
+  static bool shouldInjectCookie({
+    required Uri pageUri,
+    required SiteCookie cookie,
+  }) {
+    final pageHost = pageUri.host.toLowerCase();
+    var cookieDomain = cookie.domain.toLowerCase().trim();
+    if (cookieDomain.isEmpty) return false;
+    cookieDomain = cookieDomain.replaceAll('www.', '');
+    if (cookieDomain.isEmpty) return false;
+    final exactMatch = cookieDomain == pageHost;
+    final wildcardMatch = cookieDomain.startsWith('.') &&
+        pageHost.endsWith(cookieDomain);
+    bool match = exactMatch || wildcardMatch;
+    if (match && !exactMatch && cookieDomain.length < 4) {
+      match = false;
+    }
+    return match;
   }
 
   String matchForUrl(String url) {
     try {
-      final host = Uri.parse(url).host.toLowerCase();
-      final hits = state.where((c) {
-        final d = c.domain.toLowerCase().trim().replaceAll('www.', '');
-        return host.contains(d);
+      final current = state.valueOrNull ?? const [];
+      final pageUri = Uri.parse(url);
+      final hits = current.where((c) {
+        return shouldInjectCookie(pageUri: pageUri, cookie: c);
       }).toList();
       if (hits.isEmpty) return '';
       return hits
@@ -89,4 +114,6 @@ class CookieNotifier extends Notifier<List<SiteCookie>> {
 }
 
 final cookieListProvider =
-    NotifierProvider<CookieNotifier, List<SiteCookie>>(CookieNotifier.new);
+    AsyncNotifierProvider<CookieNotifier, List<SiteCookie>>(
+  CookieNotifier.new,
+);

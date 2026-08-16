@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import 'package:fav_app/core/constants/app_constants.dart';
@@ -36,34 +40,81 @@ class ReadPage extends ConsumerStatefulWidget {
 class _ReadPageState extends ConsumerState<ReadPage> {
   late final TextEditingController _noteCtrl;
   late final FocusNode _noteFocus;
+  late final TextEditingController _searchCtrl;
+  late final FocusNode _searchFocus;
   final PageController _pageCtrl = PageController();
+  final ScrollController _bodyScrollCtrl = ScrollController();
   Collection? _col;
+  Timer? _saveScrollTimer;
+  bool _searchOpen = false;
+  int _hitCount = 0;
+  int _currentHit = 0;
+  String _searchKw = '';
 
   @override
   void initState() {
     super.initState();
     _noteCtrl = TextEditingController();
     _noteFocus = FocusNode();
+    _searchCtrl = TextEditingController();
+    _searchFocus = FocusNode();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final col = await ref.read(collectionDetailProvider(widget.id).future);
       if (col != null) {
         _col = col;
       }
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getDouble('read_scroll_${widget.id}');
+      if (saved != null && saved > 0 && _bodyScrollCtrl.hasClients) {
+        _bodyScrollCtrl.jumpTo(saved.clamp(0.0, _bodyScrollCtrl.position.maxScrollExtent));
+      }
+      _bodyScrollCtrl.addListener(() {
+        _saveScrollTimer?.cancel();
+        _saveScrollTimer = Timer(const Duration(milliseconds: 500), () async {
+          final p = await SharedPreferences.getInstance();
+          await p.setDouble('read_scroll_${widget.id}', _bodyScrollCtrl.offset);
+        });
+      });
     });
   }
 
   @override
   void dispose() {
+    _saveScrollTimer?.cancel();
+    _bodyScrollCtrl.dispose();
     _noteCtrl.dispose();
     _noteFocus.dispose();
+    _searchCtrl.dispose();
+    _searchFocus.dispose();
     _pageCtrl.dispose();
     super.dispose();
   }
 
+  void _applySearch(String kw) {
+    setState(() {
+      _searchKw = kw.trim();
+      if (_searchKw.isEmpty) {
+        _hitCount = 0;
+        _currentHit = 0;
+      } else {
+        final rawMd = _col?.contentMd.isEmpty ?? true
+            ? _col?.rawInput ?? ''
+            : _col?.contentMd ?? '';
+        final esc = RegExp.escape(_searchKw);
+        final re = RegExp(esc, caseSensitive: false);
+        _hitCount = re.allMatches(rawMd).length;
+        _currentHit = _hitCount > 0 && _currentHit == 0 ? 1 : _currentHit;
+        if (_currentHit > _hitCount) _currentHit = _hitCount;
+      }
+    });
+  }
+
+  void _rebuildHighlight() {
+    setState(() {});
+  }
+
   String _platformLabel(String k) =>
-      {'douyin': '抖音', 'xiaoheihe': '小黑盒', 'coolapk': '酷安', 'other': '其他'}[
-          k] ??
-      k;
+      CollectionEnums.platformLabel(CollectionEnums.platformFromSql(k));
 
   /// 排版设置面板（效仿「阅读」App）：字号/行距/页边距实时调节，自动持久化
   void _showReadingStyleSheet() {
@@ -138,18 +189,10 @@ class _ReadPageState extends ConsumerState<ReadPage> {
   }
 
   String _statusLabel(String k) =>
-      {'learning': '想学', 'done': '已完成'}[k] ?? k;
+      CollectionEnums.statusLabel(CollectionEnums.statusFromSql(k));
 
-  Color _statusColor(String s, BuildContext context) {
-    switch (s) {
-      case 'learning':
-        return Colors.orange;
-      case 'done':
-        return Colors.green;
-      default:
-        return Colors.grey;
-    }
-  }
+  Color _statusColor(String s, BuildContext context) =>
+      CollectionEnums.statusColor(CollectionEnums.statusFromSql(s));
 
   /// 提交一条新笔记（评论区模式，可无限追加）。
   Future<void> _submitNote() async {
@@ -165,13 +208,27 @@ class _ReadPageState extends ConsumerState<ReadPage> {
             ),
           );
       _noteCtrl.clear();
+      _noteFocus.unfocus();
       ref.invalidate(collectionNotesProvider(widget.id));
       ref.invalidate(collectionDetailProvider(widget.id));
       ref.invalidate(collectionsListProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('笔记已保存 ✓'),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存笔记失败：$e')),
+          SnackBar(
+            content: Text('保存失败：$e'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            behavior: SnackBarBehavior.floating,
+          ),
         );
       }
     }
@@ -236,7 +293,8 @@ class _ReadPageState extends ConsumerState<ReadPage> {
                       final due = DateTime.now().add(Duration(days: d));
                       await ref.read(collectionRepositoryProvider).update(
                             col.copyWith(
-                              status: CollectionStatus.learning,
+                              status: CollectionEnums.statusToSql(
+                                  CollectionStatus.learning)!,
                               reviewDueAt: due,
                             ),
                           );
@@ -257,6 +315,265 @@ class _ReadPageState extends ConsumerState<ReadPage> {
         ),
       ),
     );
+  }
+
+  void _showDoneDialog(Collection col, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('标记为「已完成」？'),
+        content: const Text('完成后将清除阅读进度记忆。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              await ref.read(collectionRepositoryProvider).update(
+                    col.copyWith(
+                      status: CollectionEnums.statusToSql(
+                          CollectionStatus.done)!,
+                    ),
+                  );
+              ref.invalidate(collectionDetailProvider(widget.id));
+              ref.invalidate(collectionsListProvider);
+              SharedPreferences.getInstance()
+                  .then((p) => p.remove('read_scroll_${widget.id}'));
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (mounted) {
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                  const SnackBar(
+                    content: Text('已标记为完成 ✓'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            },
+            child: const Text('确认完成'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _stripMarkdown(String md) {
+    var text = md;
+    text = text.replaceAllMapped(
+      RegExp(r'^(#+)\s+', multiLine: true),
+      (m) => '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'\*\*(.+?)\*\*'),
+      (m) => m.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'\*(.+?)\*'),
+      (m) => m.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'\[(.+?)\]\(.+?\)'),
+      (m) => m.group(1) ?? '',
+    );
+    text = text.replaceAllMapped(
+      RegExp(r'^>\s+', multiLine: true),
+      (m) => '',
+    );
+    text = text.replaceAll('  \n', '\n');
+    return text.trim();
+  }
+
+  void _showShareSheet(Collection col) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.code),
+                title: const Text('导出正文为 Markdown'),
+                subtitle: const Text('复制到剪贴板，可粘贴分享'),
+                onTap: () async {
+                  final md = col.contentMd.isEmpty ? col.rawInput : col.contentMd;
+                  final text = '$md\n\n--- 来源：${col.sourceUrl}（藏星 cn.cangxing.mobile）';
+                  await Clipboard.setData(ClipboardData(text: text));
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  if (mounted) {
+                    ScaffoldMessenger.of(this.context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已复制 Markdown 到剪贴板，可粘贴分享'),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.text_snippet_outlined),
+                title: const Text('导出纯文本'),
+                subtitle: const Text('去除格式后复制到剪贴板'),
+                onTap: () async {
+                  final md = col.contentMd.isEmpty ? col.rawInput : col.contentMd;
+                  final plain = _stripMarkdown(md);
+                  final text = '$plain\n\n--- 来源：${col.sourceUrl}（藏星 cn.cangxing.mobile）';
+                  await Clipboard.setData(ClipboardData(text: text));
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  if (mounted) {
+                    ScaffoldMessenger.of(this.context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已复制纯文本到剪贴板'),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showTagsDialog(Collection c) async {
+    final tagCtrl = TextEditingController();
+    final tags = List<String>.from(c.tags);
+    final result = await showDialog<List<String>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('修改标签'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (tags.isNotEmpty)
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final t in tags)
+                        InputChip(
+                          label: Text(t),
+                          onDeleted: () =>
+                              setDialogState(() => tags.remove(t)),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: tagCtrl,
+                        decoration: const InputDecoration(
+                          hintText: '输入新标签',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: (_) {
+                          final t = tagCtrl.text.trim();
+                          if (t.isNotEmpty && !tags.contains(t)) {
+                            setDialogState(() {
+                              tags.add(t);
+                              tagCtrl.clear();
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: () {
+                        final t = tagCtrl.text.trim();
+                        if (t.isNotEmpty && !tags.contains(t)) {
+                          setDialogState(() {
+                            tags.add(t);
+                            tagCtrl.clear();
+                          });
+                        }
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ref.watch(allTagsProvider).maybeWhen(
+                      data: (counts) {
+                        final candidates = counts.keys
+                            .where((t) => !tags.contains(t))
+                            .toList()
+                          ..sort((a, b) =>
+                              (counts[b] ?? 0).compareTo(counts[a] ?? 0));
+                        if (candidates.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '已有标签（点击添加）',
+                              style: Theme.of(ctx).textTheme.bodySmall,
+                            ),
+                            const SizedBox(height: 4),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                for (final t in candidates.take(20))
+                                  ActionChip(
+                                    label: Text(counts[t]! > 0
+                                        ? '$t (${counts[t]})'
+                                        : t),
+                                    visualDensity: VisualDensity.compact,
+                                    onPressed: () => setDialogState(() {
+                                      if (!tags.contains(t)) tags.add(t);
+                                    }),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        );
+                      },
+                      orElse: () => const SizedBox.shrink(),
+                    ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, List<String>.from(tags)),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    tagCtrl.dispose();
+    if (result != null) {
+      await ref.read(collectionRepositoryProvider).update(
+            c.copyWith(tags: result),
+          );
+      ref.invalidate(collectionDetailProvider(widget.id));
+      ref.invalidate(collectionsListProvider);
+      ref.invalidate(allTagsProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('标签已更新'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   List<String> _buildPathForCategory(
@@ -309,30 +626,44 @@ class _ReadPageState extends ConsumerState<ReadPage> {
 
     final selected = await showDialog<List<String>>(
       context: context,
-      builder: (ctx) => SimpleDialog(
+      builder: (ctx) => AlertDialog(
         title: const Text('选择分类'),
-        children: [
-          ...tree.when(
-            data: (roots) {
-              final tiles = <Widget>[];
-              for (final node in roots) {
-                // 表里也有「未分类」，跳过避免与底部兜底项重复
-                if (node.category.name == AppConstants.defaultCategoryName) {
-                  continue;
-                }
-                _buildPathTiles(node, byId, tiles, depth: 0);
-              }
-              return tiles;
-            },
-            loading: () => [const SizedBox.shrink()],
-            error: (_, __) => [const SizedBox.shrink()],
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ...tree.when(
+                  data: (roots) {
+                    final tiles = <Widget>[];
+                    for (final node in roots) {
+                      // 表里也有「未分类」，跳过避免与底部兜底项重复
+                      if (node.category.name == AppConstants.defaultCategoryName) {
+                        continue;
+                      }
+                      _buildPathTiles(node, byId, tiles, depth: 0);
+                    }
+                    return tiles;
+                  },
+                  loading: () => [const SizedBox.shrink()],
+                  error: (_, __) => [const SizedBox.shrink()],
+                ),
+                // 「未分类」作为兜底放最后，不再排在文件夹前面
+                const Divider(height: 1),
+                ListTile(
+                  title: Text(AppConstants.defaultCategoryName),
+                  onTap: () => Navigator.of(ctx)
+                      .pop([AppConstants.defaultCategoryName]),
+                ),
+              ],
+            ),
           ),
-          // 「未分类」作为兜底放最后，不再排在文件夹前面
-          const Divider(height: 1),
-          ListTile(
-            title: Text(AppConstants.defaultCategoryName),
-            onTap: () => Navigator.of(ctx)
-                .pop([AppConstants.defaultCategoryName]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
           ),
         ],
       ),
@@ -403,17 +734,137 @@ class _ReadPageState extends ConsumerState<ReadPage> {
         }
       },
       child: Scaffold(
-      appBar: AppBar(
+      appBar: _searchOpen
+          ? AppBar(
+              title: TextField(
+                controller: _searchCtrl,
+                focusNode: _searchFocus,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: '在正文内查找',
+                  border: InputBorder.none,
+                ),
+                onChanged: _applySearch,
+              ),
+              actions: [
+                if (_hitCount > 0)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_upward),
+                    tooltip: '上一个',
+                    onPressed: () {
+                      setState(() {
+                        _currentHit =
+                            _currentHit <= 1 ? _hitCount : _currentHit - 1;
+                      });
+                      _rebuildHighlight();
+                    },
+                  ),
+                if (_hitCount > 0)
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 16),
+                    child: Text(
+                      _hitCount > 0 ? '$_currentHit/$_hitCount' : '',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                if (_hitCount > 0)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_downward),
+                    tooltip: '下一个',
+                    onPressed: () {
+                      setState(() {
+                        _currentHit =
+                            _currentHit >= _hitCount ? 1 : _currentHit + 1;
+                      });
+                      _rebuildHighlight();
+                    },
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: '关闭查找',
+                  onPressed: () {
+                    setState(() {
+                      _searchOpen = false;
+                      _searchCtrl.clear();
+                    });
+                    _applySearch('');
+                  },
+                ),
+              ],
+            )
+          : AppBar(
         title: Consumer(
           builder: (_, ref, __) {
             final async = ref.watch(collectionDetailProvider(widget.id));
             return async.maybeWhen(
-              data: (col) => Text(col?.title ?? '详情'),
+              data: (col) {
+                if (col == null) {
+                  return const Text('详情');
+                }
+                final catStr = col.category.isEmpty
+                    ? AppConstants.defaultCategoryName
+                    : col.category.join('/');
+                final tagStr = col.tags.isEmpty
+                    ? ''
+                    : '  #${col.tags.join(' #')}';
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      col.title,
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 2),
+                    InkWell(
+                      onTap: () async {
+                        final ok = await showMetaEditDialog(
+                          context,
+                          ref,
+                          widget.id,
+                        );
+                        if (ok) {
+                          ref.invalidate(collectionDetailProvider(widget.id));
+                          ref.invalidate(collectionsListProvider);
+                        }
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          SnackBar(
+                            content: Text(ok ? '收藏信息已更新' : '未修改'),
+                          ),
+                        );
+                      },
+                      child: Text(
+                        '📁 $catStr$tagStr',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                );
+              },
               orElse: () => const Text('详情'),
             );
           },
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: '在正文内查找',
+            onPressed: () {
+              setState(() {
+                _searchOpen = true;
+              });
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                FocusScope.of(context).requestFocus(_searchFocus);
+              });
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.format_size),
             tooltip: '排版设置',
@@ -430,15 +881,53 @@ class _ReadPageState extends ConsumerState<ReadPage> {
                   return Row(
                     children: [
                       IconButton(
+                        icon: Icon(col.pinnedAt != null
+                            ? Icons.push_pin
+                            : Icons.push_pin_outlined),
+                        tooltip: col.pinnedAt != null ? '取消置顶' : '置顶',
+                        onPressed: () async {
+                          await ref
+                              .read(collectionRepositoryProvider)
+                              .togglePin(widget.id);
+                          ref.invalidate(collectionDetailProvider(widget.id));
+                          ref.invalidate(collectionsListProvider);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(col.pinnedAt != null
+                                    ? '已取消置顶'
+                                    : '已置顶'),
+                                behavior: SnackBarBehavior.floating,
+                                duration: const Duration(seconds: 1),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.ios_share),
+                        tooltip: '分享',
+                        onPressed: () => _showShareSheet(col),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.local_offer_outlined),
+                        tooltip: '标签',
+                        onPressed: () => _showTagsDialog(col),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.folder_outlined),
+                        tooltip: '分类',
+                        onPressed: () => _openCategoryDialog(col),
+                      ),
+                      IconButton(
                         icon: const Icon(Icons.edit),
-                        tooltip: '编辑信息',
+                        tooltip: '编辑元信息',
                         onPressed: () async {
                           final ok = await showMetaEditDialog(
                             context,
                             ref,
                             widget.id,
                           );
-                          // 共享弹窗已失效列表/统计/标签，这里补详情缓存
                           if (ok) {
                             ref.invalidate(collectionDetailProvider(widget.id));
                             ref.invalidate(collectionsListProvider);
@@ -451,7 +940,6 @@ class _ReadPageState extends ConsumerState<ReadPage> {
                           );
                         },
                       ),
-                      // 删除入口：原底栏第 4 项已被「AI 对话」占用
                       IconButton(
                         icon: Icon(Icons.delete_outline,
                             color: Theme.of(context).colorScheme.error),
@@ -487,14 +975,16 @@ class _ReadPageState extends ConsumerState<ReadPage> {
             return const Center(child: Text('找不到该收藏'));
           }
           // 已读/未读功能已移除：仅「想学 / 已完成」状态显示徽标
-          final hasStatusChip = col.status == CollectionStatus.learning ||
-              col.status == CollectionStatus.done;
+          final statusEnum = CollectionEnums.statusFromSql(col.status);
+          final hasStatusChip = statusEnum == CollectionStatus.learning ||
+              statusEnum == CollectionStatus.done;
           final rootDirAsync = ref.watch(storageDirRootProvider);
           return PageView(
             controller: _pageCtrl,
             children: [
               // 视图 0：文章正文（默认，右滑不越界；左滑进入评论区）
               ListView(
+                controller: _bodyScrollCtrl,
                 padding: const EdgeInsets.only(bottom: 8),
                 children: [
                   Padding(
@@ -586,6 +1076,8 @@ class _ReadPageState extends ConsumerState<ReadPage> {
                               .replaceAll('  \n', '\n\n')
                               .replaceAll(RegExp(r' *\r?\n *'), '\n\n'),
                           rootDir: rootDir,
+                          searchKw: _searchKw,
+                          currentHit: _currentHit,
                         ),
                       );
                     },
@@ -610,42 +1102,60 @@ class _ReadPageState extends ConsumerState<ReadPage> {
       ),
       bottomNavigationBar: SizedBox(
         height: 64,
-        child: NavigationBar(
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.edit_note),
-              label: '笔记',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.psychology_alt),
-              label: '想学',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.folder),
-              label: '分类',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.auto_awesome),
-              label: 'AI 对话',
-            ),
-          ],
-          onDestinationSelected: (idx) async {
-            final col = _col;
-            if (col == null) return;
-            switch (idx) {
-              case 0:
-                _goToComments();
-                break;
-              case 1:
-                _showLearningDialog(col, ref);
-                break;
-              case 2:
-                _openCategoryDialog(col);
-                break;
-              case 3:
-                context.push('/read/${widget.id}/chat');
-                break;
-            }
+        child: Consumer(
+          builder: (_, ref, __) {
+            final async = ref.watch(collectionDetailProvider(widget.id));
+            final col = async.valueOrNull ?? _col;
+            final statusEnum = col == null
+                ? CollectionStatus.unread
+                : (CollectionEnums.statusFromSql(col.status) ??
+                    CollectionStatus.unread);
+            final isDone = statusEnum == CollectionStatus.done;
+            return NavigationBar(
+              destinations: [
+                const NavigationDestination(
+                  icon: Icon(Icons.edit_note),
+                  label: '笔记',
+                ),
+                NavigationDestination(
+                  icon: Icon(isDone ? Icons.task_alt : Icons.psychology_alt),
+                  label: isDone ? '已完成' : '想学',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.folder),
+                  label: '分类',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.auto_awesome),
+                  label: 'AI 对话',
+                ),
+              ],
+              onDestinationSelected: (idx) async {
+                final c = _col;
+                if (c == null) return;
+                switch (idx) {
+                  case 0:
+                    _goToComments();
+                    break;
+                  case 1:
+                    final s =
+                        CollectionEnums.statusFromSql(c.status) ??
+                            CollectionStatus.unread;
+                    if (s == CollectionStatus.learning) {
+                      _showDoneDialog(c, ref);
+                    } else {
+                      _showLearningDialog(c, ref);
+                    }
+                    break;
+                  case 2:
+                    _openCategoryDialog(c);
+                    break;
+                  case 3:
+                    context.push('/read/${widget.id}/chat');
+                    break;
+                }
+              },
+            );
           },
         ),
       ),
@@ -701,8 +1211,15 @@ class _ReadPageState extends ConsumerState<ReadPage> {
 class _ArticleBody extends ConsumerStatefulWidget {
   final String md;
   final String rootDir;
+  final String searchKw;
+  final int currentHit;
 
-  const _ArticleBody({required this.md, required this.rootDir});
+  const _ArticleBody({
+    required this.md,
+    required this.rootDir,
+    this.searchKw = '',
+    this.currentHit = 0,
+  });
 
   @override
   ConsumerState<_ArticleBody> createState() => _ArticleBodyState();
@@ -711,6 +1228,20 @@ class _ArticleBody extends ConsumerStatefulWidget {
 class _ArticleBodyState extends ConsumerState<_ArticleBody> {
   bool _ready = false;
   bool _listenerAttached = false;
+
+  String _applyHighlightInBody(String content, String kw, int currentHit) {
+    if (kw.trim().isEmpty) return content;
+    final escaped = RegExp.escape(kw.trim());
+    final regex = RegExp(escaped, caseSensitive: false);
+    int index = 0;
+    return content.replaceAllMapped(regex, (m) {
+      index++;
+      final isSel = index == currentHit;
+      final tag = isSel ? '<<<HLS>>>' : '<<<HL>>>';
+      final endTag = isSel ? '<<</HLS>>>' : '<<</HL>>>';
+      return '$tag${m.group(0)}$endTag';
+    });
+  }
 
   @override
   void didChangeDependencies() {
@@ -762,23 +1293,85 @@ class _ArticleBodyState extends ConsumerState<_ArticleBody> {
     final cacheWidth =
         (query.size.width * query.devicePixelRatio).round();
     final style = ref.watch(readingStyleProvider);
+    final scheme = Theme.of(context).colorScheme;
+
+    final processedMd = _applyHighlightInBody(widget.md, widget.searchKw, widget.currentHit);
+
     return Markdown(
-      data: widget.md,
+      data: processedMd,
+      inlineSyntaxes: [
+        _HighlightSelSyntax(),
+        _HighlightSyntax(),
+      ],
+      builders: {
+        'highlight': _HighlightBuilder(),
+        'highlight_sel': _HighlightSelBuilder(),
+      },
       imageDirectory: widget.rootDir,
       imageBuilder: (uri, title, alt) {
-        final path = uri.toString();
-        if (!path.startsWith('http')) {
-          return Image.file(
-            File(p.join(widget.rootDir, path)),
-            cacheWidth: cacheWidth,
-            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        try {
+          final path = uri.toString();
+          Widget thumb;
+          String? localPath;
+          if (!path.startsWith('http')) {
+            localPath = p.join(widget.rootDir, path);
+            final file = File(localPath);
+            if (!file.existsSync()) throw Exception('图片不存在: $localPath');
+            thumb = Image.file(
+              file,
+              cacheWidth: cacheWidth,
+              errorBuilder: (_, ___, ____) => Container(
+                width: 48, height: 48, color: scheme.errorContainer,
+                alignment: Alignment.center,
+                child: Icon(Icons.broken_image_outlined, size: 24, color: scheme.onErrorContainer),
+              ),
+            );
+          } else {
+            thumb = Image.network(
+              path,
+              cacheWidth: cacheWidth,
+              errorBuilder: (_, ___, ____) => Container(
+                width: 48, height: 48, color: scheme.errorContainer,
+                alignment: Alignment.center,
+                child: Icon(Icons.broken_image_outlined, size: 24, color: scheme.onErrorContainer),
+              ),
+            );
+          }
+          if (localPath != null) {
+            return GestureDetector(
+              onTap: () => showDialog(
+                context: context,
+                useSafeArea: false,
+                barrierColor: Colors.black87,
+                builder: (ctx) => Dialog(
+                  insetPadding: EdgeInsets.zero,
+                  backgroundColor: Colors.transparent,
+                  child: InteractiveViewer(
+                    maxScale: 4,
+                    child: Container(
+                      constraints: const BoxConstraints.expand(),
+                      color: Colors.black,
+                      child: Image.file(
+                        File(localPath!),
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.white, size: 64),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              child: thumb,
+            );
+          }
+          return thumb;
+        } catch (e, st) {
+          debugPrint('[ReadPage] image load failed: $e\n$st');
+          return Container(
+            width: 64, height: 64, color: scheme.errorContainer,
+            alignment: Alignment.center,
+            child: Icon(Icons.broken_image_outlined, size: 32, color: scheme.onErrorContainer),
           );
         }
-        return Image.network(
-          path,
-          cacheWidth: cacheWidth,
-          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-        );
       },
       onTapLink: (text, href, title) async {
         if (href != null) {
@@ -961,6 +1554,61 @@ class _NoteItem extends StatelessWidget {
             onPressed: onDelete,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _HighlightSyntax extends md.InlineSyntax {
+  _HighlightSyntax() : super(r'<<<HL>>>(.*?)<<</HL>>>');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final text = match.group(1)!;
+    parser.addNode(md.Element.text('highlight', text));
+    return true;
+  }
+}
+
+class _HighlightSelSyntax extends md.InlineSyntax {
+  _HighlightSelSyntax() : super(r'<<<HLS>>>(.*?)<<</HLS>>>');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final text = match.group(1)!;
+    parser.addNode(md.Element.text('highlight_sel', text));
+    return true;
+  }
+}
+
+class _HighlightBuilder extends MarkdownElementBuilder {
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    return Text.rich(
+      TextSpan(
+        text: element.textContent,
+        style: preferredStyle?.copyWith(
+          backgroundColor: const Color(0xFFFFD95E),
+          color: const Color(0xFF4A3800),
+        ),
+      ),
+    );
+  }
+}
+
+class _HighlightSelBuilder extends MarkdownElementBuilder {
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    return Text.rich(
+      TextSpan(
+        text: element.textContent,
+        style: preferredStyle?.copyWith(
+          backgroundColor: const Color(0xFFFF6B6B),
+          color: const Color(0xFFFFFFFF),
+          decoration: TextDecoration.underline,
+          decorationColor: const Color(0xFFFFFFFF),
+          decorationThickness: 2,
+        ),
       ),
     );
   }

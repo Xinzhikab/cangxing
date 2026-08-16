@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
@@ -39,7 +40,9 @@ Future<int> _dirSize(Directory dir) async {
     if (entity is File) {
       try {
         total += await entity.length();
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[StorageStats] $e\n$st');
+      }
     }
   }
   return total;

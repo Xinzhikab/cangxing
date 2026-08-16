@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import 'package:fav_app/features/save/data/models/transcription_models.dart';
 import 'package:fav_app/features/save/data/services/web_content_fetcher.dart';
 import 'package:fav_app/features/save/data/services/llm_client.dart';
@@ -22,6 +24,7 @@ class TranscriptionService {
     String? preFetchedContent,
     List<String> preFetchedImages = const [],
     void Function(TranscriptionProgress progress)? onProgress,
+    void Function(List<String> failedUrls)? onImageDownloadFailed,
   }) async {
     String text;
     List<String> images = const [];
@@ -78,6 +81,11 @@ class TranscriptionService {
             total: t,
           ),
         ),
+        onFailed: (failedUrls) {
+          debugPrint('[Transcription] ${failedUrls.length}/${images.length} '
+              '图片下载失败（已重试）：${failedUrls.join(", ")}');
+          onImageDownloadFailed?.call(failedUrls);
+        },
       );
     }
 

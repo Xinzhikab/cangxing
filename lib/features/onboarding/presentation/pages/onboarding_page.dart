@@ -32,7 +32,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
           ref.read(categoryRepositoryProvider),
           _selectedTemplate,
         );
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[Onboarding] $e\n$st');
+      }
     }
     await ref
         .read(appSettingsProvider.notifier)

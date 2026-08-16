@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:sqflite/sqflite.dart';
+import 'package:fav_app/core/constants/app_constants.dart';
 import 'package:fav_app/features/collections/data/models/collection.dart';
 import 'package:fav_app/features/collections/data/models/collection_note.dart';
 import 'package:fav_app/features/collections/data/services/database_service.dart';
@@ -9,46 +10,59 @@ import 'package:fav_app/features/collections/data/repositories/collection_reposi
 class CollectionRepositoryImpl implements CollectionRepository {
   final DatabaseService db;
   final FileStorageService fileStorage;
+  final void Function()? onChanged;
 
-  CollectionRepositoryImpl({required this.db, required this.fileStorage});
+  CollectionRepositoryImpl({
+    required this.db,
+    required this.fileStorage,
+    this.onChanged,
+  });
 
   @override
   Future<List<Collection>> list({
     List<String>? categoryPath,
-    String? platform,
+    SourcePlatform? platform,
     String? author,
-    String? status,
+    CollectionStatus? status,
     String? tag,
-    String? sortBy,
+    CollectionSortField sortBy = CollectionSortField.collectedAt,
     bool descending = true,
+    bool pinnedOnly = false,
   }) async {
     final database = await db.database;
-    final where = <String>[];
+    final where = <String>['deleted_at IS NULL'];
     final args = <dynamic>[];
 
     if (categoryPath != null && categoryPath.isNotEmpty) {
       where.add('category_json LIKE ?');
       args.add('${jsonEncode(categoryPath).replaceAll(']', '')}%');
     }
-    if (platform != null) {
+    final platformSql = CollectionEnums.platformToSql(platform);
+    if (platformSql != null) {
       where.add('source_platform = ?');
-      args.add(platform);
+      args.add(platformSql);
     }
     if (author != null) {
       where.add('author = ?');
       args.add(author);
     }
-    if (status != null) {
+    final statusSql = CollectionEnums.statusToSql(status);
+    if (statusSql != null) {
       where.add('status = ?');
-      args.add(status);
+      args.add(statusSql);
     }
     if (tag != null && tag.isNotEmpty) {
       where.add('tags LIKE ?');
       args.add('%"$tag"%');
     }
+    if (pinnedOnly) {
+      where.add('pinned_at IS NOT NULL');
+    }
 
-    final orderBy = '${_mapSortColumn(sortBy ?? 'collected_at')} ${descending ? 'DESC' : 'ASC'}';
-    final whereClause = where.isEmpty ? null : where.join(' AND ');
+    final baseOrder = '${_mapSortColumn(sortBy)} ${descending ? 'DESC' : 'ASC'}';
+    final orderBy =
+        'CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC, pinned_at DESC, $baseOrder';
+    final whereClause = where.join(' AND ');
 
     final rows = await database.query(
       'collections',
@@ -57,11 +71,76 @@ class CollectionRepositoryImpl implements CollectionRepository {
       orderBy: orderBy,
     );
 
-    return Future.wait(rows.map(_rowToCollection));
+    return rows.map(_rowToCollectionMetaOnly).toList();
+  }
+
+  @override
+  Future<List<Collection>> listMetaOnly({
+    List<String>? categoryPath,
+    SourcePlatform? platform,
+    String? author,
+    CollectionStatus? status,
+    String? tag,
+    CollectionSortField sortBy = CollectionSortField.collectedAt,
+    bool descending = true,
+    bool pinnedOnly = false,
+  }) async {
+    final database = await db.database;
+    final where = <String>['deleted_at IS NULL'];
+    final args = <dynamic>[];
+
+    if (categoryPath != null && categoryPath.isNotEmpty) {
+      where.add('category_json LIKE ?');
+      args.add('${jsonEncode(categoryPath).replaceAll(']', '')}%');
+    }
+    final platformSql = CollectionEnums.platformToSql(platform);
+    if (platformSql != null) {
+      where.add('source_platform = ?');
+      args.add(platformSql);
+    }
+    if (author != null) {
+      where.add('author = ?');
+      args.add(author);
+    }
+    final statusSql = CollectionEnums.statusToSql(status);
+    if (statusSql != null) {
+      where.add('status = ?');
+      args.add(statusSql);
+    }
+    if (tag != null && tag.isNotEmpty) {
+      where.add('tags LIKE ?');
+      args.add('%"$tag"%');
+    }
+    if (pinnedOnly) {
+      where.add('pinned_at IS NOT NULL');
+    }
+
+    final baseOrder = '${_mapSortColumn(sortBy)} ${descending ? 'DESC' : 'ASC'}';
+    final orderBy =
+        'CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC, pinned_at DESC, $baseOrder';
+    final whereClause = where.join(' AND ');
+
+    final rows = await database.query(
+      'collections',
+      where: whereClause,
+      whereArgs: args,
+      orderBy: orderBy,
+    );
+
+    return rows.map(_rowToCollectionMetaOnly).toList();
   }
 
   @override
   Future<Collection?> get(String id) async {
+    final database = await db.database;
+    // 已软删除的收藏不对外返回（除非走回收站路径）。
+    final rows = await database.query(
+      'collections',
+      where: 'id = ? AND deleted_at IS NULL',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
     final meta = await fileStorage.loadMeta(id);
     if (meta == null) return null;
     final contentMd = await fileStorage.loadContent(id);
@@ -81,6 +160,7 @@ class CollectionRepositoryImpl implements CollectionRepository {
       [col.id, col.title, col.note, contentMd],
     );
 
+    onChanged?.call();
     return col.copyWith(contentMd: contentMd);
   }
 
@@ -111,12 +191,77 @@ class CollectionRepositoryImpl implements CollectionRepository {
       [col.id, col.title, col.note, effectiveContentMd],
     );
 
+    onChanged?.call();
     return col.copyWith(contentMd: effectiveContentMd);
   }
 
   @override
   Future<void> delete(String id) async {
     final database = await db.database;
+    // 软删除：仅打 deleted_at 标记，从搜索结果移除（删 FTS 行）。
+    // 不动 collection_notes / meta / content / images 文件，便于恢复。
+    await database.update(
+      'collections',
+      {'deleted_at': DateTime.now().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    await database.rawDelete(
+      'DELETE FROM collections_fts WHERE rowid IN (SELECT rowid FROM collections WHERE id=?)',
+      [id],
+    );
+    onChanged?.call();
+  }
+
+  @override
+  Future<List<Collection>> listTrashed() async {
+    final database = await db.database;
+    final rows = await database.query(
+      'collections',
+      where: 'deleted_at IS NOT NULL',
+      orderBy: 'deleted_at DESC',
+    );
+    return rows.map(_rowToCollectionMetaOnly).toList();
+  }
+
+  @override
+  Future<void> restore(String id) async {
+    final database = await db.database;
+    await database.update(
+      'collections',
+      {'deleted_at': null},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    // 重建 FTS 索引，使该收藏重新可被搜索。
+    final rows = await database.query(
+      'collections',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      final row = rows.first;
+      final title = (row['title'] as String?) ?? '';
+      final note = (row['note'] as String?) ?? '';
+      final contentMd = await fileStorage.loadContent(id);
+      await database.rawDelete(
+        'DELETE FROM collections_fts WHERE rowid IN (SELECT rowid FROM collections WHERE id=?)',
+        [id],
+      );
+      await database.rawInsert(
+        'INSERT INTO collections_fts(rowid, title, note, content_text) '
+        'VALUES ((SELECT rowid FROM collections WHERE id=?), ?, ?, ?)',
+        [id, title, note, contentMd],
+      );
+    }
+    onChanged?.call();
+  }
+
+  @override
+  Future<void> permanentDelete(String id) async {
+    final database = await db.database;
+    // 先删 FTS（通过子查询取 rowid，避免依赖已删行）
     await database.rawDelete(
       'DELETE FROM collections_fts WHERE rowid IN (SELECT rowid FROM collections WHERE id=?)',
       [id],
@@ -131,10 +276,55 @@ class CollectionRepositoryImpl implements CollectionRepository {
       where: 'collection_id = ?',
       whereArgs: [id],
     );
-
+    // 再删物理文件
     await fileStorage.deleteMeta(id);
     await fileStorage.deleteContent(id);
     await fileStorage.deleteImagesDir(id);
+    onChanged?.call();
+  }
+
+  @override
+  Future<void> emptyTrash() async {
+    final trashed = await listTrashed();
+    await Future.wait(trashed.map((c) => permanentDelete(c.id)));
+  }
+
+  @override
+  Future<void> togglePin(String id) async {
+    final database = await db.database;
+    final row = await database.query(
+      'collections',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (row.isEmpty) return;
+    final wasPinned = row.first['pinned_at'] != null;
+    await database.update(
+      'collections',
+      {
+        'pinned_at':
+            wasPinned ? null : DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    onChanged?.call();
+  }
+
+  @override
+  Future<void> setPinnedBatch(List<String> ids, {required bool pinned}) async {
+    if (ids.isEmpty) return;
+    final database = await db.database;
+    final val = pinned ? DateTime.now().millisecondsSinceEpoch : null;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await database.update(
+      'collections',
+      {'pinned_at': val},
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
+    );
+    onChanged?.call();
   }
 
   @override
@@ -143,8 +333,6 @@ class CollectionRepositoryImpl implements CollectionRepository {
     final kw = keyword.trim();
     if (kw.isEmpty) return [];
 
-    // FTS 前缀匹配：每个词加 *（搜 "wi" 可命中 "win"），多词 AND。
-    // 注意：FTS5 MATCH 参数里不能带未转义引号，剥掉即可
     final terms = kw
         .split(RegExp(r'\s+'))
         .map((t) => t.replaceAll('"', ''))
@@ -158,7 +346,7 @@ class CollectionRepositoryImpl implements CollectionRepository {
     if (terms.isNotEmpty) {
       final ftsRows = await database.rawQuery(
         'SELECT c.* FROM collections c JOIN collections_fts f ON f.rowid = (SELECT rowid FROM collections WHERE id = c.id) '
-        'WHERE collections_fts MATCH ? ORDER BY rank LIMIT ?',
+        'WHERE collections_fts MATCH ? AND c.deleted_at IS NULL ORDER BY rank LIMIT ?',
         [terms, limit],
       );
       for (final r in ftsRows) {
@@ -166,16 +354,15 @@ class CollectionRepositoryImpl implements CollectionRepository {
       }
     }
 
-    // LIKE 兜底：unicode61 分词器把连续中文当一整个 token，
-    // 中文词搜索 FTS 命中不了，靠标题/作者/标签 LIKE 补
-    final like = '%$kw%';
-    final likeRows = await database.rawQuery(
-      'SELECT * FROM collections WHERE title LIKE ? OR author LIKE ? '
-      'OR tags LIKE ? OR note LIKE ? LIMIT ?',
-      [like, like, like, like, limit],
-    );
-    for (final r in likeRows) {
-      if (seen.add(r['id'] as String)) rows.add(r);
+    if (kw.length < 3) {
+      final like = '%$kw%';
+      final likeRows = await database.rawQuery(
+        'SELECT * FROM collections WHERE deleted_at IS NULL AND (title LIKE ? OR author LIKE ? OR note LIKE ?) LIMIT ?',
+        [like, like, like, limit],
+      );
+      for (final r in likeRows) {
+        if (seen.add(r['id'] as String)) rows.add(r);
+      }
     }
 
     return Future.wait(rows.take(limit).map(_rowToCollection));
@@ -193,16 +380,18 @@ class CollectionRepositoryImpl implements CollectionRepository {
 
   @override
   Future<List<Map<String, int>>> groupByStatus() async {
-    // 已读/未读功能已移除：状态筛选只保留「想学 / 已完成」
+    final learning = CollectionEnums.statusValues[CollectionStatus.learning]!;
+    final done = CollectionEnums.statusValues[CollectionStatus.done]!;
     return (await _groupBy('status'))
-        .where((m) => m.keys.first == 'learning' || m.keys.first == 'done')
+        .where((m) => m.keys.first == learning || m.keys.first == done)
         .toList();
   }
 
   Future<List<Map<String, int>>> _groupBy(String column) async {
     final database = await db.database;
     final rows = await database.rawQuery(
-      'SELECT $column AS key, COUNT(*) AS count FROM collections GROUP BY $column ORDER BY count DESC',
+      'SELECT $column AS key, COUNT(*) AS count FROM collections '
+      'WHERE deleted_at IS NULL GROUP BY $column ORDER BY count DESC',
     );
     return rows.map((r) {
       final key = r['key'] as String? ?? '';
@@ -211,29 +400,19 @@ class CollectionRepositoryImpl implements CollectionRepository {
     }).toList();
   }
 
-  String _mapSortColumn(String sortBy) {
-    switch (sortBy) {
-      case 'title':
-        return 'title';
-      case 'collected_at':
-        return 'collected_at';
-      case 'published_at':
-        return 'published_at';
-      case 'author':
-        return 'author';
-      case 'review_due_at':
-        return 'review_due_at';
-      default:
-        return 'collected_at';
-    }
-  }
+  String _mapSortColumn(CollectionSortField f) => CollectionEnums.sortToSql(f);
 
   Map<String, dynamic> _collectionToRow(Collection col) {
+    final typeEnum = CollectionEnums.typeFromSql(col.type);
+    final statusEnum = CollectionEnums.statusFromSql(col.status);
+    final platformEnum = CollectionEnums.platformFromSql(col.sourcePlatform);
     return {
       'id': col.id,
       'title': col.title,
-      'type': col.type,
-      'source_platform': col.sourcePlatform,
+      'type': CollectionEnums.typeToSql(typeEnum) ??
+          CollectionEnums.typeToSql(CollectionType.article)!,
+      'source_platform': CollectionEnums.platformToSql(platformEnum) ??
+          CollectionEnums.platformToSql(SourcePlatform.other)!,
       'source_url': col.sourceUrl,
       'author': col.author,
       'published_at': col.publishedAt?.toIso8601String(),
@@ -241,9 +420,11 @@ class CollectionRepositoryImpl implements CollectionRepository {
       'category_json': jsonEncode(col.category),
       'images_json': jsonEncode(col.images),
       'note': col.note,
-      'status': col.status,
+      'status': CollectionEnums.statusToSql(statusEnum) ??
+          CollectionEnums.statusToSql(CollectionStatus.unread)!,
       'review_due_at': col.reviewDueAt?.toIso8601String(),
       'tags': jsonEncode(col.tags),
+      'pinned_at': col.pinnedAt,
     };
   }
 
@@ -270,12 +451,41 @@ class CollectionRepositoryImpl implements CollectionRepository {
           .whereType<String>()
           .toList(growable: false),
       rawInput: '',
+      deletedAt: row['deleted_at'] as int?,
+      pinnedAt: row['pinned_at'] as int?,
     );
     final contentMd = await fileStorage.loadContent(col.id);
     return col.copyWith(contentMd: contentMd);
   }
 
-  // ---------- 评论区模式（多条笔记） ----------
+  Collection _rowToCollectionMetaOnly(Map<String, dynamic> row) {
+    return Collection(
+      id: row['id'] as String,
+      title: row['title'] as String? ?? '',
+      type: row['type'] as String? ?? '',
+      sourcePlatform: row['source_platform'] as String? ?? '',
+      sourceUrl: row['source_url'] as String? ?? '',
+      author: row['author'] as String? ?? '',
+      publishedAt: row['published_at'] != null
+          ? DateTime.tryParse(row['published_at'] as String)
+          : null,
+      collectedAt: DateTime.parse(row['collected_at'] as String),
+      category: (jsonDecode(row['category_json'] as String? ?? '[]') as List<dynamic>).cast<String>(),
+      images: (jsonDecode(row['images_json'] as String? ?? '[]') as List<dynamic>).cast<String>(),
+      note: row['note'] as String? ?? '',
+      status: row['status'] as String? ?? '',
+      reviewDueAt: row['review_due_at'] != null
+          ? DateTime.tryParse(row['review_due_at'] as String)
+          : null,
+      tags: ((jsonDecode(row['tags'] as String? ?? '[]') as List<dynamic>))
+          .whereType<String>()
+          .toList(growable: false),
+      rawInput: '',
+      contentMd: '',
+      deletedAt: row['deleted_at'] as int?,
+      pinnedAt: row['pinned_at'] as int?,
+    );
+  }
 
   @override
   Future<List<CollectionNote>> listNotes(String collectionId) async {
@@ -294,6 +504,7 @@ class CollectionRepositoryImpl implements CollectionRepository {
     final database = await db.database;
     await database.insert('collection_notes', note.toRow());
     await _syncNoteForSearch(note.collectionId, note.content);
+    onChanged?.call();
     return note;
   }
 
@@ -314,7 +525,6 @@ class CollectionRepositoryImpl implements CollectionRepository {
     );
     if (rows.isNotEmpty) {
       final collectionId = rows.first['collection_id'] as String;
-      // 同步 note 列（供全文搜索）：取剩余最新一条，无则清空
       final latest = await database.rawQuery(
         'SELECT content FROM collection_notes WHERE collection_id = ? '
         'ORDER BY created_at DESC LIMIT 1',
@@ -324,9 +534,9 @@ class CollectionRepositoryImpl implements CollectionRepository {
           latest.isNotEmpty ? latest.first['content'] as String? ?? '' : '';
       await _syncNoteForSearch(collectionId, text);
     }
+    onChanged?.call();
   }
 
-  /// 笔记变更时同步 collections.note 列与 FTS 索引，保证全文搜索仍能命中笔记。
   Future<void> _syncNoteForSearch(String collectionId, String noteText) async {
     final database = await db.database;
     await database.update(
@@ -349,8 +559,6 @@ class CollectionRepositoryImpl implements CollectionRepository {
     );
   }
 
-  // ---------- 标签注册表（手动创建的标签，供 AI 保存时优先关联） ----------
-
   @override
   Future<List<String>> listTags() async {
     final database = await db.database;
@@ -360,22 +568,12 @@ class CollectionRepositoryImpl implements CollectionRepository {
   }
 
   @override
-  Future<void> addTag(String name) async {
-    final t = _cleanTagName(name);
-    if (t.isEmpty) return;
-    final database = await db.database;
-    await database.insert(
-      'tags',
-      {'name': t, 'created_at': DateTime.now().toIso8601String()},
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
-  }
+  Future<void> addTag(String name) async {}
 
   @override
   Future<void> deleteTag(String name) async {
     final database = await db.database;
     await database.transaction((txn) async {
-      await txn.delete('tags', where: 'name = ?', whereArgs: [name]);
       final rows = await txn.query('collections', columns: ['id', 'tags']);
       for (final row in rows) {
         final tags = (jsonDecode(row['tags'] as String? ?? '[]') as List<dynamic>)
@@ -391,6 +589,7 @@ class CollectionRepositoryImpl implements CollectionRepository {
         }
       }
     });
+    onChanged?.call();
   }
 
   @override
@@ -399,12 +598,6 @@ class CollectionRepositoryImpl implements CollectionRepository {
     if (t.isEmpty || t == oldName) return;
     final database = await db.database;
     await database.transaction((txn) async {
-      await txn.delete('tags', where: 'name = ?', whereArgs: [oldName]);
-      await txn.insert(
-        'tags',
-        {'name': t, 'created_at': DateTime.now().toIso8601String()},
-        conflictAlgorithm: ConflictAlgorithm.ignore,
-      );
       final rows = await txn.query('collections', columns: ['id', 'tags']);
       for (final row in rows) {
         final tags =
@@ -422,9 +615,9 @@ class CollectionRepositoryImpl implements CollectionRepository {
         }
       }
     });
+    onChanged?.call();
   }
 
-  /// 规范化标签名：去空白、去掉会破坏 LIKE 匹配的引号，限制长度。
   static String _cleanTagName(String name) {
     var t = name
         .trim()
