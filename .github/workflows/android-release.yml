@@ -48,13 +48,19 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      - name: Create debug keystore (CI 无默认 debug.keystore，release 签名 fallback 需要)
+      - name: Create signing keystore + keystore.properties (CI 无签名配置，自建)
         run: |
-          mkdir -p ~/.android
-          keytool -genkey -v -keystore ~/.android/debug.keystore \
-            -storepass android -alias androiddebugkey -keypass android \
+          keytool -genkey -v -keystore $HOME/cangxing-ci.keystore \
+            -storepass cangxing -alias cangxing -keypass cangxing \
             -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+            -dname "CN=Cangxing CI,O=Cangxing,C=CN"
+          cat > android/keystore.properties << 'EOF'
+          storeFile=/home/runner/cangxing-ci.keystore
+          storePassword=cangxing
+          keyAlias=cangxing
+          keyPassword=cangxing
+          EOF
+          echo "✅ keystore.properties created"
 
       - name: Build APK (release)
         run: flutter build apk --release
