@@ -1,0 +1,93 @@
+name: Build & Release Android APK
+
+# 触发条件：push 到 main 分支自动构建并发布新版本；也支持手动触发
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# 创建 Release + push tag 需要写权限（使用内置 GITHUB_TOKEN，无需额外 PAT）
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Read version from pubspec
+        id: ver
+        run: |
+          LINE=$(grep '^version:' pubspec.yaml)
+          VERSION=$(echo "$LINE" | sed -E 's/version:[[:space:]]*([0-9.]+)\+([0-9]+).*/\1/')
+          CODE=$(echo "$LINE" | sed -E 's/version:[[:space:]]*([0-9.]+)\+([0-9]+).*/\2/')
+          BUILD=${{ github.run_number }}
+          TAG="v${VERSION}-build.${BUILD}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "code=$CODE" >> $GITHUB_OUTPUT
+          echo "build=$BUILD" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "::notice::version=$VERSION code=$CODE build=$BUILD tag=$TAG"
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build APK (release)
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: |
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             "cangxing-v${{ steps.ver.outputs.version }}-build${{ steps.ver.outputs.build }}-release.apk"
+
+      - name: Compute SHA256 & size
+        id: sha
+        run: |
+          APK="cangxing-v${{ steps.ver.outputs.version }}-build${{ steps.ver.outputs.build }}-release.apk"
+          SHA=$(sha256sum "$APK" | awk '{print $1}')
+          SIZE=$(du -m "$APK" | cut -f1)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          echo "::notice::APK size=${SIZE}MB sha256=${SHA}"
+
+      - name: Create Release & Upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: 藏星 v${{ steps.ver.outputs.version }} (build ${{ steps.ver.outputs.build }})
+          body: |
+            ## 📦 包信息
+            - 版本: `${{ steps.ver.outputs.version }}+${{ steps.ver.outputs.code }}`
+            - 构建: #${{ steps.ver.outputs.build }}
+            - 包名: `cn.cangxing.mobile`
+            - 构建类型: Release (R8 优化, debug 签名 — 可直接安装)
+            - 大小: ${{ steps.sha.outputs.size }} MB
+            - SHA256: `${{ steps.sha.outputs.sha }}`
+
+            ### 🚀 安装
+            ```bash
+            adb install -r cangxing-v${{ steps.ver.outputs.version }}-build${{ steps.ver.outputs.build }}-release.apk
+            ```
+
+            ### 📝 触发提交
+            ${{ github.event.head_commit.message }}
+          files: |
+            cangxing-v${{ steps.ver.outputs.version }}-build${{ steps.ver.outputs.build }}-release.apk
+          prerelease: false
+          generate_release_notes: true
