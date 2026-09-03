@@ -126,6 +126,41 @@ class DatabaseService {
         'ALTER TABLE collections ADD COLUMN pinned_at INTEGER DEFAULT NULL',
       );
     }
+    // v7 → v8：新增藏宝点（treasure_spots）与藏宝点文件夹（spot_folders）两张表。
+    if (oldVersion < 8) {
+      await db.execute('''
+        CREATE TABLE spot_folders (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          icon_code INTEGER,
+          color_value INTEGER,
+          sort_order INTEGER,
+          created_at TEXT
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE treasure_spots (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          address TEXT,
+          latitude REAL,
+          longitude REAL,
+          place_type TEXT,
+          folder_id TEXT,
+          tags TEXT,
+          note TEXT,
+          images_json TEXT,
+          created_at TEXT,
+          updated_at TEXT
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX idx_treasure_spots_folder_id ON treasure_spots(folder_id)
+      ''');
+      await db.execute('''
+        CREATE INDEX idx_spot_folders_sort_order ON spot_folders(sort_order)
+      ''');
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -215,6 +250,42 @@ class DatabaseService {
         note,
         content_text
       )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE spot_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        icon_code INTEGER,
+        color_value INTEGER,
+        sort_order INTEGER,
+        created_at TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE treasure_spots (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        address TEXT,
+        latitude REAL,
+        longitude REAL,
+        place_type TEXT,
+        folder_id TEXT,
+        tags TEXT,
+        note TEXT,
+        images_json TEXT,
+        created_at TEXT,
+        updated_at TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_treasure_spots_folder_id ON treasure_spots(folder_id)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_spot_folders_sort_order ON spot_folders(sort_order)
     ''');
   }
 

@@ -5,7 +5,7 @@ class AppConstants {
 
   static const String appName = '藏星';
 
-  static const int dbVersion = 7;
+  static const int dbVersion = 8;
   static const String dbName = 'fav_app.db';
 
   static const int pageSize = 20;
@@ -57,6 +57,27 @@ enum ThemeModeValue {
         dark => ThemeMode.dark,
         _ => ThemeMode.system,
       };
+}
+
+enum AppIconOption {
+  defaultOption('default', '默认'),
+  blue('blue', '蓝调'),
+  orange('orange', '暖橙'),
+  green('green', '森林'),
+  night('night', '夜空'),
+  pink('pink', '樱花');
+
+  final String value;
+  final String label;
+
+  const AppIconOption(this.value, this.label);
+
+  static AppIconOption fromValue(String? v) {
+    for (final e in AppIconOption.values) {
+      if (e.value == v) return e;
+    }
+    return AppIconOption.defaultOption;
+  }
 }
 
 /// ============================================================

@@ -170,6 +170,13 @@ class SettingsPage extends ConsumerWidget {
                     subtitle: '栏目显示、标签/摘要、标题行数与紧凑模式',
                     onTap: () => context.push('/settings/list-style'),
                   ),
+                  _SettingsTile(
+                    icon: Icons.apps_outlined,
+                    tint: _Tint.tertiary,
+                    title: '应用图标',
+                    subtitle: '选择内置图标，6 款预设',
+                    onTap: () => context.push('/settings/app-icon'),
+                  ),
                 ],
               ),
               _SettingsSection(

@@ -12,12 +12,17 @@ import 'package:fav_app/features/read/presentation/pages/read_page.dart';
 import 'package:fav_app/features/save/presentation/pages/save_page.dart';
 import 'package:fav_app/features/settings/data/providers/app_settings_provider.dart';
 import 'package:fav_app/features/settings/presentation/pages/about_page.dart';
+import 'package:fav_app/features/settings/presentation/pages/app_icon_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/cookies_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/list_style_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/llm_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/smtp_settings_page.dart';
 import 'package:fav_app/features/settings/presentation/pages/trash_page.dart';
+import 'package:fav_app/features/treasure_spots/presentation/pages/spot_detail_page.dart';
+import 'package:fav_app/features/treasure_spots/presentation/pages/spot_edit_page.dart';
+import 'package:fav_app/features/treasure_spots/presentation/pages/spot_folders_page.dart';
+import 'package:fav_app/features/treasure_spots/presentation/pages/treasure_spots_page.dart';
 
 class AppRouter {
   static GoRouter createRouter(WidgetRef ref) {
@@ -87,6 +92,11 @@ class AppRouter {
                           const ListStyleSettingsPage(),
                     ),
                     GoRoute(
+                      path: 'app-icon',
+                      builder: (context, state) =>
+                          const AppIconSettingsPage(),
+                    ),
+                    GoRoute(
                       path: 'cookies',
                       builder: (context, state) => const CookiesPage(),
                     ),
@@ -101,6 +111,30 @@ class AppRouter {
                     GoRoute(
                       path: 'about',
                       builder: (context, state) => const AboutPage(),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            StatefulShellBranch(
+              routes: [
+                GoRoute(
+                  path: '/treasure-spots',
+                  builder: (context, state) => const TreasureSpotsPage(),
+                  routes: [
+                    GoRoute(
+                      path: 'edit',
+                      // extra: String? spotId；页面内部通过 ModalRoute.settings.arguments 读取
+                      builder: (context, state) => const SpotEditPage(),
+                    ),
+                    GoRoute(
+                      path: 'detail',
+                      // extra: String spotId；页面内部通过 ModalRoute.settings.arguments 读取
+                      builder: (context, state) => const SpotDetailPage(),
+                    ),
+                    GoRoute(
+                      path: 'folders',
+                      builder: (context, state) => const SpotFoldersPage(),
                     ),
                   ],
                 ),

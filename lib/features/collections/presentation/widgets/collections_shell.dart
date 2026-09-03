@@ -128,6 +128,11 @@ class _CollectionsShellState extends ConsumerState<CollectionsShell> {
             selectedIcon: Icon(Icons.settings),
             label: '设置',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.place_outlined),
+            selectedIcon: Icon(Icons.place),
+            label: '地点',
+          ),
         ],
       ),
     );

@@ -67,6 +67,7 @@ class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
   static const String _kDynamicColor = 'dynamic_color';
   static const String _kClipboardDetection = 'clipboard_detection';
   static const String _kThemeMode = 'theme_mode';
+  static const String _kAppIcon = 'app_icon';
 
   static const String _kSecLlmApiKey = 'sec_llm_api_key';
   static const String _kSecSmtpPassword = 'sec_smtp_password';
@@ -120,6 +121,7 @@ class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
       dynamicColor: prefs.getBool(_kDynamicColor) ?? true,
       clipboardDetection: prefs.getBool(_kClipboardDetection) ?? true,
       themeMode: prefs.getInt(_kThemeMode) ?? 0,
+      appIcon: prefs.getString(_kAppIcon) ?? 'default',
     );
   }
 
@@ -140,6 +142,7 @@ class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
     bool? dynamicColor,
     bool? clipboardDetection,
     int? themeMode,
+    String? appIcon,
   }) async {
     final current = state.valueOrNull;
     if (current == null) return;
@@ -160,6 +163,7 @@ class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
       dynamicColor: dynamicColor,
       clipboardDetection: clipboardDetection,
       themeMode: themeMode,
+      appIcon: appIcon,
     );
     // 乐观更新：直接下发新值，避免每次写入都闪 loading 导致页面「鬼畜抽动」
     state = AsyncValue.data(updated);
@@ -197,6 +201,7 @@ class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
     await prefs.setBool(_kDynamicColor, settings.dynamicColor);
     await prefs.setBool(_kClipboardDetection, settings.clipboardDetection);
     await prefs.setInt(_kThemeMode, settings.themeMode);
+    await prefs.setString(_kAppIcon, settings.appIcon);
 
     // 敏感字段：仅在值变化时写入 FlutterSecureStorage
     if (settings.llmApiKey != current.llmApiKey) {

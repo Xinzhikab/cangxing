@@ -15,6 +15,7 @@ class AppSettings {
   final bool dynamicColor;
   final bool clipboardDetection;
   final int themeMode;
+  final String appIcon;
 
   AppSettings({
     required this.llmBaseUrl,
@@ -26,13 +27,14 @@ class AppSettings {
     required this.reminderChannels,
     required this.smtpHost,
     required this.smtpPort,
-    required this.smtpSsl,
+    required this.smtbSsl,
     required this.smtpUsername,
     required this.smtpPassword,
     required this.smtpRecipient,
     required this.dynamicColor,
     required this.clipboardDetection,
     this.themeMode = 0,
+    this.appIcon = 'default',
   });
 
   AppSettings copyWith({
@@ -52,6 +54,7 @@ class AppSettings {
     bool? dynamicColor,
     bool? clipboardDetection,
     int? themeMode,
+    String? appIcon,
   }) {
     return AppSettings(
       llmBaseUrl: llmBaseUrl ?? this.llmBaseUrl,
@@ -72,6 +75,7 @@ class AppSettings {
       dynamicColor: dynamicColor ?? this.dynamicColor,
       clipboardDetection: clipboardDetection ?? this.clipboardDetection,
       themeMode: themeMode ?? this.themeMode,
+      appIcon: appIcon ?? this.appIcon,
     );
   }
 
@@ -93,6 +97,7 @@ class AppSettings {
       'dynamicColor': dynamicColor,
       'clipboardDetection': clipboardDetection,
       'themeMode': themeMode,
+      'appIcon': appIcon,
     };
   }
 
@@ -117,6 +122,7 @@ class AppSettings {
       dynamicColor: json['dynamicColor'] as bool? ?? true,
       clipboardDetection: json['clipboardDetection'] as bool? ?? true,
       themeMode: json['themeMode'] as int? ?? 0,
+      appIcon: json['appIcon'] as String? ?? 'default',
     );
   }
 }

@@ -21,6 +21,7 @@ import 'package:fav_app/features/collections/data/providers/collection_repositor
 import 'package:fav_app/features/collections/data/providers/collections_list_controller.dart';
 import 'package:fav_app/features/collections/presentation/pages/category_articles_page.dart';
 import 'package:fav_app/features/collections/presentation/widgets/meta_edit_dialog.dart';
+import 'package:fav_app/features/read/presentation/widgets/image_gallery_viewer.dart';
 import 'package:fav_app/features/settings/data/providers/reading_style_provider.dart';
 
 class ReadPage extends ConsumerStatefulWidget {
@@ -1297,6 +1298,15 @@ class _ArticleBodyState extends ConsumerState<_ArticleBody> {
 
     final processedMd = _applyHighlightInBody(widget.md, widget.searchKw, widget.currentHit);
 
+    // 从 md 正文中提取所有图片路径，用于图文浏览顺序
+    final mdImages = <String>[];
+    // 支持 ![alt](url) 和 ![alt](url "title")，只取 URL 部分
+    final imgRegex = RegExp(r'!\[[^\]]*\]\(\s*(\S+?)(?:\s+["\'][^)]*?)?\s*\)');
+    for (final m in imgRegex.allMatches(widget.md)) {
+      final p1 = m.group(1);
+      if (p1 != null && p1.isNotEmpty) mdImages.add(p1);
+    }
+
     return Markdown(
       data: processedMd,
       inlineSyntaxes: [
@@ -1312,9 +1322,8 @@ class _ArticleBodyState extends ConsumerState<_ArticleBody> {
         try {
           final path = uri.toString();
           Widget thumb;
-          String? localPath;
           if (!path.startsWith('http')) {
-            localPath = p.join(widget.rootDir, path);
+            final localPath = p.join(widget.rootDir, path);
             final file = File(localPath);
             if (!file.existsSync()) throw Exception('图片不存在: $localPath');
             thumb = Image.file(
@@ -1337,33 +1346,25 @@ class _ArticleBodyState extends ConsumerState<_ArticleBody> {
               ),
             );
           }
-          if (localPath != null) {
-            return GestureDetector(
-              onTap: () => showDialog(
-                context: context,
-                useSafeArea: false,
-                barrierColor: Colors.black87,
-                builder: (ctx) => Dialog(
-                  insetPadding: EdgeInsets.zero,
-                  backgroundColor: Colors.transparent,
-                  child: InteractiveViewer(
-                    maxScale: 4,
-                    child: Container(
-                      constraints: const BoxConstraints.expand(),
-                      color: Colors.black,
-                      child: Image.file(
-                        File(localPath!),
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.white, size: 64),
-                      ),
-                    ),
+          // 计算当前图片在全文中的序号（按 md 出现顺序），找不到就退化为末尾
+          final idx = mdImages.indexOf(path);
+          final initialIndex = idx < 0 ? mdImages.length : idx;
+          return GestureDetector(
+            onTap: () {
+              if (mdImages.isEmpty) return;
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  fullscreenDialog: true,
+                  builder: (ctx) => ImageGalleryViewer(
+                    imagePaths: mdImages,
+                    initialIndex: initialIndex,
+                    rootDir: widget.rootDir,
                   ),
                 ),
-              ),
-              child: thumb,
-            );
-          }
-          return thumb;
+              );
+            },
+            child: thumb,
+          );
         } catch (e, st) {
           debugPrint('[ReadPage] image load failed: $e\n$st');
           return Container(
