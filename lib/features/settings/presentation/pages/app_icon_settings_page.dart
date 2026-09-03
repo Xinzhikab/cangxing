@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fav_app/features/settings/data/providers/app_settings_provider.dart';
+
+const _appIconChannel = MethodChannel('cn.cangxing.mobile/app_icon');
 
 class AppIconPreset {
   final String key;
@@ -182,6 +185,14 @@ class AppIconSettingsPage extends ConsumerWidget {
       await ref
           .read(appSettingsProvider.notifier)
           .updateSettings(appIcon: opt.key);
+      try {
+        await _appIconChannel.invokeMethod(
+          'setAppIcon',
+          {'iconName': opt.key},
+        );
+      } catch (_) {
+        // 平台方法调用失败不影响偏好设置保存
+      }
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('已保存图标设置，重启后生效')),
